@@ -1,4 +1,4 @@
-# Video Scraper
+# Stock Video Collector
 
 ![Version](https://img.shields.io/badge/version-0.7.1-blue)
 ![Python](https://img.shields.io/badge/Python-3.9+-3776AB?logo=python&logoColor=white)
@@ -9,8 +9,6 @@
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 > Headless browser crawler with a dark-themed PyQt6 desktop GUI for discovering, cataloging, and downloading stock video clips from multiple sites — with full metadata extraction, FTS5 keyword search, and a concurrent download manager.
-
-![Screenshot](screenshot.png)
 
 ---
 
