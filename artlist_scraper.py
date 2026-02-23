@@ -1,4 +1,4 @@
-# Video Scraper v0.7.1
+# Video Scraper v1.1.0
 # Headless crawler with PyQt6 GUI — full metadata + keyword search + download manager
 # Phase 1-3: Search quality, thumbnail pipeline, card/grid view
 # Phase 4-6: Detail panel, archive management, collections, stats, filename templates
@@ -21,8 +21,66 @@
 #          thread-safe Row-to-dict conversion, FTS rebuild mechanism, bootstrap guard,
 #          diagnostic logging for DB/DL errors, download worker stop race fix,
 #          clipboard monitor opt-in, consolidated imports, unbounded fetchall limits
+# v0.8.0: Catalog mode — full-width card grid for browsing all clips, sort controls
+#          (newest/oldest/title/resolution/duration/rating), XL card size (320x180),
+#          slide-in detail panel on card click, close button for catalog detail dismissal,
+#          ClipCard keys reference fix
+# v0.8.1: Import Folder — scan local video directories into the catalog with
+#          ffprobe metadata extraction (resolution, duration, fps), automatic
+#          thumbnail generation, parent folder as collection name, stable
+#          hash-based clip IDs, recursive scan, background import worker
+# v0.8.2: Audit fixes — infinite search loop (timer connected to _do_search
+#          instead of _do_search_impl), source_site missing from _VALID_COLUMNS
+#          (Source dropdown filter silently rejected), _write_sidecar NameError
+#          (clip_data→data), hashlib import moved out of per-file loop
+# v0.9.0: Premium theme overhaul — cinema-grade deep dark palette,
+#          refined typography and spacing, professional surface hierarchy,
+#          ultra-thin scrollbars, glass-effect toasts, premium stat cards,
+#          refined card grid styling, updated branding and accent system
+# v0.9.1: FTS auto-recovery — startup integrity check auto-rebuilds corrupted
+#          FTS index, all FTS writes separated from main data operations,
+#          corruption detected at runtime triggers automatic DROP+recreate,
+#          search/search_assets gracefully fall back during recovery,
+#          clear_all hardened against corrupted FTS tables
+# v0.9.2: Artlist crawl fixes — scan no longer dumps 57 related video previews
+#          when clip ID not found in URL (was polluting DB with wrong URLs),
+#          M3U8 master playlist parsing extracts RESOLUTION= and FRAME-RATE=
+#          for Artlist HLS streams (fixes res:? on every clip), response
+#          interceptor skips unverifiable URLs after first video captured,
+#          JS interceptor skips unverifiable URLs entirely, catalog video
+#          extraction falls back to href for clip ID, metadata selectors
+#          now handle newlines between label and value
+# v1.0.0: UI scaling system -- zoom controls (75%-200%) in header bar,
+#          Ctrl+=/Ctrl+-/Ctrl+0 shortcuts, full UI rebuild on zoom change,
+#          all setFixedHeight/Width/Size + inline font-sizes use Z() scaling,
+#          _build_stylesheet(scale) replaces static DARK_STYLE, zoom persists.
+#          Power improvements -- concurrent downloads up to 32 (default 4),
+#          retries up to 25, batch size up to 5000, max depth 25, lower
+#          minimum delays (200ms page / 50ms scroll / 500ms M3U8), scroll
+#          steps up to 200, bandwidth limit up to 500 MB/s.
+# v1.1.0: Multi-select cards (Ctrl+click toggle, Shift+click range), bulk
+#          context menu ops (rate/fav/collect/download N clips at once),
+#          Ctrl+A select all / Escape deselect, selection count in status.
+#          Disk space check before downloads (500 MB minimum free).
+#          Export current search results (filtered TXT/JSON/M3U/CSV).
+#          Lazy batch thumbnail loading (30/frame) prevents UI freeze.
+#          WAL checkpoint timer (2 min) prevents unbounded WAL growth.
+#          Auto-trim log every 500 appends (was every append).
+#          Open Config / DB / Output directory buttons in Archive tab.
+#          All remaining hardcoded px values now use Z() scaling.
 
-import sys, os, subprocess, traceback, re, random
+import sys, os, subprocess, traceback, re, random, shutil
+
+# Hide console window on Windows immediately (before any prints)
+if sys.platform == 'win32':
+    try:
+        import ctypes as _ct
+        _hw = _ct.windll.kernel32.GetConsoleWindow()
+        if _hw:
+            _ct.windll.user32.ShowWindow(_hw, 0)  # SW_HIDE
+        del _ct, _hw
+    except Exception:
+        pass
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CRASH HANDLER
@@ -38,7 +96,7 @@ def _crash_handler(exc_type, exc_value, exc_tb):
     try:
         import ctypes
         ctypes.windll.user32.MessageBoxW(
-            0, f"Fatal error:\n{crash_file}\n\n{msg[:800]}", "Artlist Scraper — Fatal Error", 0x10)
+            0, f"Fatal error:\n{crash_file}\n\n{msg[:800]}", "Video Scraper — Fatal Error", 0x10)
     except Exception: pass
     sys.exit(1)
 
@@ -178,138 +236,390 @@ def S(px):
     return max(1, int(px * _dpi_factor))
 
 
+# Global UI zoom level (1.0 = 100%)
+_ui_scale = 1.0
+
+ZOOM_PRESETS = [
+    ('75%',  0.75),
+    ('90%',  0.90),
+    ('100%', 1.00),
+    ('110%', 1.10),
+    ('125%', 1.25),
+    ('150%', 1.50),
+    ('175%', 1.75),
+    ('200%', 2.00),
+]
+
+def Z(px):
+    """Scale a pixel value by both DPI factor AND UI zoom level. Returns int.
+    Used for all programmatic widget sizing — buttons, cards, margins, fonts.
+    """
+    return max(1, int(px * _ui_scale * _dpi_factor))
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# DARK THEME
+# THEME PALETTE SYSTEM
 # ─────────────────────────────────────────────────────────────────────────────
 
-DARK_STYLE = """
-/* ── Base ────────────────────────────────────────────────────────────── */
-QMainWindow, QDialog, QWidget { background-color: #1e1e2e; color: #cdd6f4; font-family: 'Segoe UI', 'SF Pro', system-ui, sans-serif; }
-QDialog QLabel { color: #cdd6f4; }
-QDialog QLineEdit { background-color: #313244; color: #cdd6f4; border: 1px solid #45475a; border-radius: 5px; padding: 7px 10px; }
-QDialog QPushButton { min-width: 80px; }
+# Active palette — referenced by C(key) helper and _build_stylesheet()
+_theme_palette = {}
 
-/* ── Tabs ────────────────────────────────────────────────────────────── */
-QTabWidget::pane { border: 1px solid #313244; background: #1e1e2e; border-radius: 4px; }
-QTabBar::tab { background: #181825; color: #6c7086; padding: 9px 20px; border-bottom: 2px solid transparent; margin-right: 2px; }
-QTabBar::tab:selected { color: #cdd6f4; border-bottom: 2px solid #89b4fa; background: #1e1e2e; }
-QTabBar::tab:hover:!selected { color: #a6adc8; background: #313244; }
+def C(key):
+    """Return the active theme color for a semantic key. Like Z() for colors."""
+    return _theme_palette.get(key, '#ff00ff')  # magenta = missing key
 
-/* ── Buttons ─────────────────────────────────────────────────────────── */
-QPushButton { background-color: #89b4fa; color: #1e1e2e; border: none; padding: 8px 18px; border-radius: 6px; font-weight: 600; }
-QPushButton:hover { background-color: #b4d0fb; }
-QPushButton:pressed { background-color: #74c7ec; }
-QPushButton:disabled { background-color: #313244; color: #585b70; }
-QPushButton:checked { background-color: #74c7ec; color: #1e1e2e; border: 1px solid #89b4fa; }
-QPushButton#danger  { background-color: #f38ba8; }
-QPushButton#danger:hover  { background-color: #f5a0b8; }
-QPushButton#success { background-color: #a6e3a1; color: #1e1e2e; }
-QPushButton#success:hover { background-color: #b8f0b3; }
-QPushButton#warning { background-color: #f9e2af; color: #1e1e2e; }
-QPushButton#warning:hover { background-color: #faefc5; }
-QPushButton#neutral { background-color: #313244; color: #cdd6f4; }
-QPushButton#neutral:hover { background-color: #45475a; }
-QPushButton#neutral:checked { background-color: #45475a; border: 1px solid #89b4fa; color: #89b4fa; }
-
-/* ── Inputs ──────────────────────────────────────────────────────────── */
-QLineEdit, QSpinBox, QComboBox, QDoubleSpinBox {
-    background-color: #313244; color: #cdd6f4; border: 1px solid #45475a;
-    border-radius: 5px; padding: 6px 10px;
-    selection-background-color: #89b4fa; selection-color: #1e1e2e;
+THEME_PALETTES = {
+    'OLED': {
+        # Surfaces
+        'bg':           '#0c0c12', 'bg_deep':       '#08080e', 'bg_input':      '#0e0e18',
+        'bg_card':      '#10101a', 'bg_header':     '#08080e', 'bg_hover':      '#121220',
+        'bg_button':    '#18182a', 'bg_card_area':  '#0a0a10', 'bg_panel':      '#0a0a12',
+        'bg_tooltip':   '#141420', 'bg_video':      '#06060a',
+        # Borders
+        'border':       '#1a1a2a', 'border_input':  '#1e1e32', 'border_light':  '#24243a',
+        'border_subtle':'#14141e', 'border_card':   '#16162a',
+        # Text
+        'text':         '#dcdce8', 'text_muted':    '#52526e', 'text_hover':    '#8e8ea8',
+        'text_disabled':'#36364e', 'text_soft':     '#b0b0c8', 'text_neutral':  '#a0a0bc',
+        # Accent
+        'accent':       '#3d8af7', 'accent_hover':  '#5a9ef9', 'accent_pressed':'#2a6fd0',
+        'accent_bg':    '#182040', 'accent_grad':   '#38bdf8', 'accent_combo':  '#12121e',
+        # Status
+        'success':      '#2dd4a8', 'error':         '#e85d75', 'warning':       '#e8a832',
+        'danger':       '#c92a2a', 'danger_hover':  '#e03c3c',
+        'success_btn':  '#0d8a5e', 'success_btn_h': '#12a674',
+        'warning_btn':  '#b8860b', 'warning_btn_h': '#d4a017',
+        # Special
+        'purple':       '#9580f0', 'purple_hover':  '#b0a0ff',
+        'log_text':     '#2dd4a8',
+        # Selection
+        'sel_border':   '#3d8af7', 'sel_bg':        '#0e1424',
+        'multi_border': '#9580f0', 'multi_bg':      '#12102a',
+        # Toast backgrounds
+        'toast_info_bg':   '#0e1420', 'toast_success_bg': '#0a1a14',
+        'toast_warning_bg':'#1a1408', 'toast_error_bg':   '#1a0a0e',
+    },
+    'Dark': {
+        'bg':           '#1a1b26', 'bg_deep':       '#13141c', 'bg_input':      '#1e1f2e',
+        'bg_card':      '#1f2030', 'bg_header':     '#13141c', 'bg_hover':      '#252638',
+        'bg_button':    '#2a2b3d', 'bg_card_area':  '#161722', 'bg_panel':      '#171824',
+        'bg_tooltip':   '#222336', 'bg_video':      '#10111a',
+        'border':       '#2e2f44', 'border_input':  '#33345a', 'border_light':  '#3a3b56',
+        'border_subtle':'#262738', 'border_card':   '#282940',
+        'text':         '#d5d6e8', 'text_muted':    '#6b6d8a', 'text_hover':    '#9a9cb8',
+        'text_disabled':'#484a64', 'text_soft':     '#b4b6d0', 'text_neutral':  '#a0a2bc',
+        'accent':       '#4d94ff', 'accent_hover':  '#6aa6ff', 'accent_pressed':'#3570d4',
+        'accent_bg':    '#1e2a48', 'accent_grad':   '#42c0ff', 'accent_combo':  '#1e1f30',
+        'success':      '#34ddb0', 'error':         '#f06080', 'warning':       '#f0b040',
+        'danger':       '#d03030', 'danger_hover':  '#e84444',
+        'success_btn':  '#109868', 'success_btn_h': '#16b480',
+        'warning_btn':  '#c49010', 'warning_btn_h': '#daa820',
+        'purple':       '#a090f8', 'purple_hover':  '#bbb0ff',
+        'log_text':     '#34ddb0',
+        'sel_border':   '#4d94ff', 'sel_bg':        '#1a2438',
+        'multi_border': '#a090f8', 'multi_bg':      '#1e1838',
+        'toast_info_bg':   '#141e30', 'toast_success_bg': '#102820',
+        'toast_warning_bg':'#282010', 'toast_error_bg':   '#281018',
+    },
+    'Midnight': {
+        'bg':           '#0d1117', 'bg_deep':       '#080c10', 'bg_input':      '#111820',
+        'bg_card':      '#131a24', 'bg_header':     '#080c10', 'bg_hover':      '#182030',
+        'bg_button':    '#1c2638', 'bg_card_area':  '#0a1018', 'bg_panel':      '#0c1218',
+        'bg_tooltip':   '#162030', 'bg_video':      '#06080c',
+        'border':       '#1e2a3a', 'border_input':  '#243040', 'border_light':  '#2c3a4c',
+        'border_subtle':'#162030', 'border_card':   '#1a2434',
+        'text':         '#d0d8e8', 'text_muted':    '#4e6080', 'text_hover':    '#8090a8',
+        'text_disabled':'#344050', 'text_soft':     '#a0b0c8', 'text_neutral':  '#90a0b8',
+        'accent':       '#58a6ff', 'accent_hover':  '#79b8ff', 'accent_pressed':'#3a80d0',
+        'accent_bg':    '#162844', 'accent_grad':   '#4ac0f0', 'accent_combo':  '#101820',
+        'success':      '#3fb950', 'error':         '#f85149', 'warning':       '#d29922',
+        'danger':       '#c42020', 'danger_hover':  '#e03838',
+        'success_btn':  '#1a8040', 'success_btn_h': '#239850',
+        'warning_btn':  '#b08018', 'warning_btn_h': '#c89820',
+        'purple':       '#bc8cff', 'purple_hover':  '#d2a8ff',
+        'log_text':     '#3fb950',
+        'sel_border':   '#58a6ff', 'sel_bg':        '#0e1a2c',
+        'multi_border': '#bc8cff', 'multi_bg':      '#14102c',
+        'toast_info_bg':   '#0c1828', 'toast_success_bg': '#0c2018',
+        'toast_warning_bg':'#201808', 'toast_error_bg':   '#200c10',
+    },
+    'Graphite': {
+        'bg':           '#2b2b30', 'bg_deep':       '#222226', 'bg_input':      '#303036',
+        'bg_card':      '#333338', 'bg_header':     '#222226', 'bg_hover':      '#3a3a40',
+        'bg_button':    '#404048', 'bg_card_area':  '#282830', 'bg_panel':      '#292930',
+        'bg_tooltip':   '#383840', 'bg_video':      '#1c1c22',
+        'border':       '#48484e', 'border_input':  '#505058', 'border_light':  '#5a5a62',
+        'border_subtle':'#3e3e46', 'border_card':   '#444450',
+        'text':         '#e0e0e8', 'text_muted':    '#88889a', 'text_hover':    '#b0b0c0',
+        'text_disabled':'#606070', 'text_soft':     '#c0c0d0', 'text_neutral':  '#a8a8b8',
+        'accent':       '#5a9cf5', 'accent_hover':  '#78b0ff', 'accent_pressed':'#4080d0',
+        'accent_bg':    '#2a3448', 'accent_grad':   '#48baff', 'accent_combo':  '#343438',
+        'success':      '#40d8a8', 'error':         '#f06878', 'warning':       '#f0b840',
+        'danger':       '#d03838', 'danger_hover':  '#e84c4c',
+        'success_btn':  '#189868', 'success_btn_h': '#20b080',
+        'warning_btn':  '#c89818', 'warning_btn_h': '#e0b020',
+        'purple':       '#a898f8', 'purple_hover':  '#c0b0ff',
+        'log_text':     '#40d8a8',
+        'sel_border':   '#5a9cf5', 'sel_bg':        '#2e3440',
+        'multi_border': '#a898f8', 'multi_bg':      '#302838',
+        'toast_info_bg':   '#242838', 'toast_success_bg': '#1c2c24',
+        'toast_warning_bg':'#302818', 'toast_error_bg':   '#301820',
+    },
+    'Mocha': {
+        'bg':           '#1e1e2e', 'bg_deep':       '#181825', 'bg_input':      '#232336',
+        'bg_card':      '#262637', 'bg_header':     '#181825', 'bg_hover':      '#2e2e42',
+        'bg_button':    '#36364c', 'bg_card_area':  '#1c1c2c', 'bg_panel':      '#1e1e30',
+        'bg_tooltip':   '#2c2c40', 'bg_video':      '#141420',
+        'border':       '#3e3e58', 'border_input':  '#454560', 'border_light':  '#50506a',
+        'border_subtle':'#333348', 'border_card':   '#383850',
+        'text':         '#cdd6f4', 'text_muted':    '#6c7086', 'text_hover':    '#9399b2',
+        'text_disabled':'#585b70', 'text_soft':     '#bac2de', 'text_neutral':  '#a6adc8',
+        'accent':       '#89b4fa', 'accent_hover':  '#a6c8ff', 'accent_pressed':'#6a96d8',
+        'accent_bg':    '#1e2c48', 'accent_grad':   '#74c7ec', 'accent_combo':  '#252538',
+        'success':      '#a6e3a1', 'error':         '#f38ba8', 'warning':       '#f9e2af',
+        'danger':       '#d04040', 'danger_hover':  '#e85858',
+        'success_btn':  '#40a060', 'success_btn_h': '#50b870',
+        'warning_btn':  '#d0a020', 'warning_btn_h': '#e0b838',
+        'purple':       '#cba6f7', 'purple_hover':  '#dcc0ff',
+        'log_text':     '#a6e3a1',
+        'sel_border':   '#89b4fa', 'sel_bg':        '#1e2438',
+        'multi_border': '#cba6f7', 'multi_bg':      '#241e38',
+        'toast_info_bg':   '#1a2038', 'toast_success_bg': '#182820',
+        'toast_warning_bg':'#282018', 'toast_error_bg':   '#281420',
+    },
 }
-QLineEdit:focus, QSpinBox:focus, QComboBox:focus { border-color: #89b4fa; }
-QSpinBox::up-button, QSpinBox::down-button { background: #45475a; border: none; border-radius: 3px; width: 18px; }
-QSpinBox::up-button:hover, QSpinBox::down-button:hover { background: #585b70; }
-QSpinBox::up-arrow { image: none; border-left: 4px solid transparent; border-right: 4px solid transparent; border-bottom: 5px solid #cdd6f4; }
-QSpinBox::down-arrow { image: none; border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 5px solid #cdd6f4; }
-QComboBox::drop-down { border: none; width: 24px; subcontrol-position: right center; }
-QComboBox::down-arrow { image: none; border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 5px solid #cdd6f4; }
-QComboBox QAbstractItemView {
-    background-color: #1e1e2e; color: #cdd6f4; border: 1px solid #45475a;
-    selection-background-color: #313244; selection-color: #89b4fa;
-    padding: 4px; outline: none;
-}
-QComboBox QAbstractItemView::item { padding: 4px 8px; border-radius: 3px; }
-QComboBox QAbstractItemView::item:selected { background-color: #313244; }
 
-/* ── Text areas ──────────────────────────────────────────────────────── */
-QTextEdit, QPlainTextEdit {
-    background-color: #11111b; color: #a6e3a1; border: 1px solid #313244;
-    border-radius: 5px; padding: 8px;
-    font-family: 'Cascadia Code', 'Consolas', monospace;
-}
+THEME_NAMES = list(THEME_PALETTES.keys())
 
-/* ── Groups / Checkboxes ─────────────────────────────────────────────── */
-QGroupBox { border: 1px solid #313244; border-radius: 8px; margin-top: 14px; padding: 14px 12px 10px 12px; color: #cdd6f4; font-weight: 600; }
-QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; color: #89b4fa; }
-QCheckBox { color: #cdd6f4; spacing: 6px; }
-QCheckBox::indicator { width: 16px; height: 16px; border-radius: 3px; border: 1px solid #45475a; background: #313244; }
-QCheckBox::indicator:checked { background-color: #89b4fa; border-color: #89b4fa; }
-QCheckBox::indicator:hover { border-color: #89b4fa; }
+_active_theme_name = 'OLED'
 
-/* ── Labels ──────────────────────────────────────────────────────────── */
-QLabel { color: #cdd6f4; background: transparent; }
-QLabel#subtext { color: #6c7086; }
+def _set_theme(name):
+    """Activate a theme palette by name."""
+    global _theme_palette, _active_theme_name
+    _theme_palette = THEME_PALETTES.get(name, THEME_PALETTES['OLED']).copy()
+    _active_theme_name = name
 
-/* ── Progress bars ───────────────────────────────────────────────────── */
-QProgressBar { background-color: #313244; border: none; border-radius: 5px; text-align: center; color: #cdd6f4; height: 8px; }
-QProgressBar::chunk { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #89b4fa, stop:1 #74c7ec); border-radius: 5px; }
+# Default theme
+_set_theme('OLED')
 
-/* ── Tables ──────────────────────────────────────────────────────────── */
-QTableWidget { background-color: #11111b; alternate-background-color: #181825; color: #cdd6f4; border: 1px solid #313244; gridline-color: #1e1e2e; }
-QTableWidget::item { padding: 4px 8px; }
-QTableWidget::item:selected { background-color: #313244; color: #89b4fa; }
-QHeaderView::section { background-color: #181825; color: #6c7086; border: none; border-right: 1px solid #313244; border-bottom: 1px solid #313244; padding: 6px 8px; font-weight: 600; }
+# ─────────────────────────────────────────────────────────────────────────────
+# THEMED STYLESHEET GENERATOR
+# ─────────────────────────────────────────────────────────────────────────────
 
-/* ── Scroll bars ─────────────────────────────────────────────────────── */
-QScrollBar:vertical { background: #181825; width: 8px; border: none; }
-QScrollBar::handle:vertical { background: #45475a; border-radius: 4px; min-height: 30px; }
-QScrollBar::handle:vertical:hover { background: #585b70; }
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
-QScrollBar:horizontal { background: #181825; height: 8px; border: none; }
-QScrollBar::handle:horizontal { background: #45475a; border-radius: 4px; min-width: 30px; }
-QScrollBar::handle:horizontal:hover { background: #585b70; }
-QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+def _build_stylesheet(scale=1.0, theme_name=None):
+    """Generate the complete themed stylesheet scaled by the given factor."""
+    if theme_name:
+        _set_theme(theme_name)
+    p = _theme_palette
+    sf = scale * _dpi_factor
+    def px(base):
+        return max(1, int(base * sf))
+    return f"""
+/* VIDEO SCRAPER -- Premium Theme v1.2.0 | {_active_theme_name} | zoom: {int(scale*100)}% */
 
-/* ── Status bar ──────────────────────────────────────────────────────── */
-QStatusBar { background-color: #181825; color: #6c7086; border-top: 1px solid #313244; padding: 0 10px; }
+QMainWindow, QDialog, QWidget {{
+    background-color: {p['bg']}; color: {p['text']};
+    font-family: 'Segoe UI Variable Display', 'Segoe UI', 'SF Pro Display', system-ui, sans-serif;
+    font-size: {px(13)}px;
+}}
+QDialog QLabel {{ color: {p['text']}; }}
+QDialog QLineEdit {{
+    background-color: {p['bg_tooltip']}; color: {p['text']};
+    border: 1px solid {p['border_light']}; border-radius: {px(5)}px;
+    padding: {px(7)}px {px(10)}px;
+}}
+QDialog QPushButton {{ min-width: {px(80)}px; }}
 
-/* ── Cards + stat panels ─────────────────────────────────────────────── */
-QFrame#stat-card { background-color: #181825; border: 1px solid #313244; border-radius: 8px; }
-QFrame#clip-card { background-color: #181825; border: 1px solid #313244; border-radius: 8px; }
-QFrame#clip-card:hover { border-color: #89b4fa; background-color: #1e1e35; }
-QPushButton#tag-chip {
-    background: #313244; color: #cba6f7;
-    font-size: 9px; padding: 1px 6px;
-    border-radius: 3px; font-weight: 600;
-    border: none; text-align: left;
-}
-QPushButton#tag-chip:hover { background: #45475a; }
+QTabWidget::pane {{ border: none; background: {p['bg']}; border-top: 1px solid {p['border']}; }}
+QTabBar::tab {{
+    background: transparent; color: {p['text_muted']};
+    padding: {px(10)}px {px(24)}px; border: none;
+    border-bottom: 2px solid transparent;
+    font-weight: 500; font-size: {px(12)}px;
+}}
+QTabBar::tab:selected {{ color: {p['text']}; border-bottom: 2px solid {p['accent']}; }}
+QTabBar::tab:hover:!selected {{ color: {p['text_hover']}; background: {p['bg_card']}; }}
 
-/* ── Sliders ─────────────────────────────────────────────────────────── */
-QSlider::groove:horizontal { background:#313244; height:4px; border-radius:2px; }
-QSlider::handle:horizontal { background:#89b4fa; width:14px; height:14px; margin:-5px 0; border-radius:7px; }
-QSlider::handle:horizontal:hover { background:#b4d0fb; }
-QSlider::sub-page:horizontal { background:#89b4fa; border-radius:2px; }
+QPushButton {{
+    background-color: {p['accent']}; color: #ffffff; border: none;
+    padding: {px(8)}px {px(18)}px; border-radius: {px(5)}px;
+    font-weight: 600; font-size: {px(12)}px;
+}}
+QPushButton:hover {{ background-color: {p['accent_hover']}; }}
+QPushButton:pressed {{ background-color: {p['accent_pressed']}; }}
+QPushButton:disabled {{ background-color: {p['bg_button']}; color: {p['text_disabled']}; }}
+QPushButton:checked {{ background-color: {p['accent_pressed']}; color: {p['text']}; border: 1px solid {p['accent']}; }}
+QPushButton#danger  {{ background-color: {p['danger']}; color: #ffffff; }}
+QPushButton#danger:hover  {{ background-color: {p['danger_hover']}; }}
+QPushButton#success {{ background-color: {p['success_btn']}; color: #ffffff; }}
+QPushButton#success:hover {{ background-color: {p['success_btn_h']}; }}
+QPushButton#warning {{ background-color: {p['warning_btn']}; color: #ffffff; }}
+QPushButton#warning:hover {{ background-color: {p['warning_btn_h']}; }}
+QPushButton#neutral {{ background-color: {p['bg_button']}; color: {p['text_neutral']}; }}
+QPushButton#neutral:hover {{ background-color: {p['bg_hover']}; color: {p['text']}; }}
+QPushButton#neutral:checked {{ background-color: {p['accent_bg']}; border: 1px solid {p['accent']}; color: {p['accent']}; }}
 
-/* ── Menus ────────────────────────────────────────────────────────────── */
-QMenu { background:#181825; color:#cdd6f4; border:1px solid #313244; padding:4px; border-radius:6px; }
-QMenu::item { padding:6px 24px 6px 16px; border-radius:4px; }
-QMenu::item:selected { background:#313244; color:#89b4fa; }
-QMenu::item:disabled { color:#585b70; }
-QMenu::separator { height:1px; background:#313244; margin:4px 8px; }
-QMenu::right-arrow { width:12px; height:12px; }
+QLineEdit, QSpinBox, QComboBox, QDoubleSpinBox {{
+    background-color: {p['bg_input']}; color: {p['text']};
+    border: 1px solid {p['border_input']}; border-radius: {px(5)}px;
+    padding: {px(6)}px {px(10)}px;
+    selection-background-color: {p['accent']}; selection-color: #ffffff;
+    font-size: {px(13)}px;
+}}
+QLineEdit:focus, QSpinBox:focus, QComboBox:focus {{ border-color: {p['accent']}; }}
+QSpinBox::up-button, QSpinBox::down-button {{
+    background: {p['bg_button']}; border: none; border-radius: 2px; width: {px(20)}px;
+}}
+QSpinBox::up-button:hover, QSpinBox::down-button:hover {{ background: {p['border_light']}; }}
+QSpinBox::up-arrow {{
+    image: none;
+    border-left: {px(4)}px solid transparent; border-right: {px(4)}px solid transparent;
+    border-bottom: {px(5)}px solid {p['text_hover']};
+}}
+QSpinBox::down-arrow {{
+    image: none;
+    border-left: {px(4)}px solid transparent; border-right: {px(4)}px solid transparent;
+    border-top: {px(5)}px solid {p['text_hover']};
+}}
+QComboBox::drop-down {{ border: none; width: {px(26)}px; subcontrol-position: right center; }}
+QComboBox::down-arrow {{
+    image: none;
+    border-left: {px(4)}px solid transparent; border-right: {px(4)}px solid transparent;
+    border-top: {px(5)}px solid {p['text_muted']};
+}}
+QComboBox QAbstractItemView {{
+    background-color: {p['bg_input']}; color: {p['text']};
+    border: 1px solid {p['border_light']}; selection-background-color: {p['accent_bg']};
+    selection-color: {p['accent_hover']}; padding: {px(4)}px; outline: none;
+}}
+QComboBox QAbstractItemView::item {{ padding: {px(6)}px {px(10)}px; border-radius: {px(3)}px; }}
+QComboBox QAbstractItemView::item:selected {{ background-color: {p['accent_bg']}; }}
 
-/* ── Tooltips ────────────────────────────────────────────────────────── */
-QToolTip { background:#1e1e2e; color:#cdd6f4; border:1px solid #313244; padding:4px 8px; border-radius:4px; }
+QTextEdit, QPlainTextEdit {{
+    background-color: {p['bg_deep']}; color: {p['log_text']};
+    border: 1px solid {p['border']}; border-radius: {px(5)}px;
+    padding: {px(8)}px;
+    font-family: 'Cascadia Code', 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: {px(12)}px;
+}}
 
-/* ── Scroll areas (transparent bg) ───────────────────────────────────── */
-QScrollArea { background: transparent; border: none; }
-QScrollArea > QWidget > QWidget { background: transparent; }
+QGroupBox {{
+    border: 1px solid {p['border']}; border-radius: {px(8)}px;
+    margin-top: {px(14)}px;
+    padding: {px(16)}px {px(14)}px {px(12)}px {px(14)}px;
+    color: {p['text']}; font-weight: 600; font-size: {px(13)}px;
+}}
+QGroupBox::title {{
+    subcontrol-origin: margin; left: {px(14)}px;
+    padding: 0 {px(8)}px; color: {p['accent_hover']}; font-weight: 600;
+}}
+QCheckBox {{ color: {p['text']}; spacing: {px(6)}px; font-size: {px(13)}px; }}
+QCheckBox::indicator {{
+    width: {px(16)}px; height: {px(16)}px;
+    border-radius: {px(3)}px; border: 1px solid {p['border_light']}; background: {p['bg_input']};
+}}
+QCheckBox::indicator:checked {{ background-color: {p['accent']}; border-color: {p['accent']}; }}
+QCheckBox::indicator:hover {{ border-color: {p['accent']}; }}
 
-/* ── Separator frames ────────────────────────────────────────────────── */
-QFrame[frameShape="4"], QFrame[frameShape="5"] { color: #313244; }
+QLabel {{ color: {p['text']}; background: transparent; font-size: {px(13)}px; }}
+QLabel#subtext {{ color: {p['text_muted']}; font-size: {px(11)}px; }}
+
+QProgressBar {{
+    background-color: {p['bg_card']}; border: none; border-radius: {px(3)}px;
+    text-align: center; color: {p['text']}; height: {px(6)}px;
+}}
+QProgressBar::chunk {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 {p['accent']}, stop:0.5 {p['accent_hover']}, stop:1 {p['accent_grad']});
+    border-radius: {px(3)}px;
+}}
+
+QTableWidget {{
+    background-color: {p['bg_deep']}; alternate-background-color: {p['bg']};
+    color: {p['text']}; border: 1px solid {p['border']};
+    gridline-color: {p['bg_card']}; font-size: {px(12)}px;
+}}
+QTableWidget::item {{ padding: {px(4)}px {px(8)}px; }}
+QTableWidget::item:selected {{ background-color: {p['accent_bg']}; color: {p['accent_hover']}; }}
+QHeaderView::section {{
+    background-color: {p['bg_card_area']}; color: {p['text_muted']}; border: none;
+    border-right: 1px solid {p['border_subtle']}; border-bottom: 1px solid {p['border']};
+    padding: {px(7)}px {px(10)}px; font-weight: 600;
+    font-size: {px(11)}px; text-transform: uppercase; letter-spacing: 0.6px;
+}}
+
+QScrollBar:vertical {{
+    background: transparent; width: {px(7)}px; border: none; margin: {px(3)}px 1px;
+}}
+QScrollBar::handle:vertical {{
+    background: {p['border_light']}; border-radius: {px(3)}px; min-height: {px(40)}px;
+}}
+QScrollBar::handle:vertical:hover {{ background: {p['text_disabled']}; }}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+QScrollBar:horizontal {{
+    background: transparent; height: {px(7)}px; border: none; margin: 1px {px(3)}px;
+}}
+QScrollBar::handle:horizontal {{
+    background: {p['border_light']}; border-radius: {px(3)}px; min-width: {px(40)}px;
+}}
+QScrollBar::handle:horizontal:hover {{ background: {p['text_disabled']}; }}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
+
+QStatusBar {{
+    background-color: {p['bg_deep']}; color: {p['text_muted']};
+    border-top: 1px solid {p['border_subtle']}; padding: 0 {px(14)}px;
+    font-size: {px(12)}px;
+}}
+
+QFrame#stat-card {{
+    background-color: {p['bg_card']}; border: 1px solid {p['border']}; border-radius: {px(8)}px;
+}}
+QFrame#clip-card {{
+    background-color: {p['bg_card']}; border: 1px solid {p['border_card']}; border-radius: {px(8)}px;
+}}
+QFrame#clip-card:hover {{ border-color: {p['accent']}44; background-color: {p['bg_hover']}; }}
+QPushButton#tag-chip {{
+    background: {p['bg_button']}; color: {p['purple']};
+    font-size: {px(10)}px; padding: {px(1)}px {px(6)}px;
+    border-radius: {px(3)}px; font-weight: 600; border: none; text-align: left;
+}}
+QPushButton#tag-chip:hover {{ background: {p['bg_hover']}; color: {p['purple_hover']}; }}
+
+QSlider::groove:horizontal {{ background: {p['bg_button']}; height: {px(3)}px; border-radius: 1px; }}
+QSlider::handle:horizontal {{
+    background: {p['accent']}; width: {px(14)}px; height: {px(14)}px;
+    margin: {px(-6)}px 0; border-radius: {px(7)}px;
+}}
+QSlider::handle:horizontal:hover {{ background: {p['accent_hover']}; }}
+QSlider::sub-page:horizontal {{ background: {p['accent']}; border-radius: 1px; }}
+
+QMenu {{
+    background: {p['bg_input']}; color: {p['text']};
+    border: 1px solid {p['border_input']}; padding: {px(5)}px; border-radius: {px(8)}px;
+}}
+QMenu::item {{
+    padding: {px(7)}px {px(28)}px {px(7)}px {px(16)}px;
+    border-radius: {px(4)}px; font-size: {px(12)}px;
+}}
+QMenu::item:selected {{ background: {p['accent_bg']}; color: {p['accent_hover']}; }}
+QMenu::item:disabled {{ color: {p['text_disabled']}; }}
+QMenu::separator {{ height: 1px; background: {p['border']}; margin: {px(4)}px {px(8)}px; }}
+QMenu::right-arrow {{ width: {px(12)}px; height: {px(12)}px; }}
+
+QToolTip {{
+    background: {p['bg_tooltip']}; color: {p['text']}; border: 1px solid {p['border_light']};
+    padding: {px(6)}px {px(10)}px; border-radius: {px(5)}px;
+    font-size: {px(12)}px;
+}}
+
+QScrollArea {{ background: transparent; border: none; }}
+QScrollArea > QWidget > QWidget {{ background: transparent; }}
+QFrame[frameShape="4"], QFrame[frameShape="5"] {{ color: {p['border']}; }}
+QSplitter::handle {{ background: {p['border']}; width: 1px; }}
 """
+
+# Default stylesheet for initial load
+DARK_STYLE = _build_stylesheet(1.0)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DATABASE — expanded schema with full clip metadata + FTS search
@@ -402,7 +712,7 @@ class DB:
             CREATE TABLE IF NOT EXISTS collections (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 name        TEXT UNIQUE NOT NULL,
-                color       TEXT DEFAULT '#89b4fa',
+                color       TEXT DEFAULT '#3d8af7',
                 created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TABLE IF NOT EXISTS clip_collections (
@@ -420,6 +730,42 @@ class DB:
             );
         """)
         self.conn.commit()
+        # ── FTS integrity check — auto-rebuild if corrupted ───────────
+        self._check_fts_health()
+
+    def _check_fts_health(self):
+        """Startup check: verify FTS table is readable. Auto-rebuild if corrupted."""
+        try:
+            self.conn.execute("SELECT COUNT(*) FROM clips_fts").fetchone()
+        except Exception as e:
+            err_s = str(e).lower()
+            if 'malformed' in err_s or 'corrupt' in err_s or 'no such table' in err_s:
+                print(f"[DB] FTS corruption detected at startup: {e}")
+                print("[DB] Running automatic FTS rebuild...")
+                try:
+                    self.conn.execute("DROP TABLE IF EXISTS clips_fts")
+                    self.conn.execute("""
+                        CREATE VIRTUAL TABLE clips_fts USING fts5(
+                            title, creator, collection, tags, resolution, camera, duration,
+                            content='clips', content_rowid='id',
+                            tokenize='porter unicode61'
+                        )
+                    """)
+                    self.conn.execute("""
+                        INSERT INTO clips_fts(rowid, title, creator, collection, tags,
+                                              resolution, camera, duration)
+                        SELECT id, COALESCE(title,''), COALESCE(creator,''),
+                               COALESCE(collection,''),
+                               COALESCE(tags,'') || ' ' || COALESCE(user_tags,''),
+                               COALESCE(resolution,''), COALESCE(camera,''),
+                               COALESCE(duration,'')
+                        FROM clips
+                    """)
+                    self.conn.commit()
+                    count = self.conn.execute("SELECT COUNT(*) FROM clips_fts").fetchone()[0]
+                    print(f"[DB] Startup FTS rebuild complete: {count} rows indexed")
+                except Exception as rebuild_err:
+                    print(f"[DB ERROR] Startup FTS rebuild failed: {rebuild_err}")
 
     def execute(self, sql, params=()):
         with self._lock:
@@ -506,17 +852,26 @@ class DB:
                     str(data.get('source_site','') or ''),
                 ))
                 is_new = cur.rowcount > 0
+                self.conn.commit()
+                # FTS indexing — separate try so main insert succeeds even if FTS corrupted
                 if is_new:
                     rowid = cur.lastrowid
-                    self.conn.execute("""
-                        INSERT INTO clips_fts(rowid,title,creator,collection,tags,resolution,camera,duration)
-                        VALUES (?,?,?,?,?,?,?,?)
-                    """, (rowid,
-                          data.get('title',''), data.get('creator',''),
-                          data.get('collection',''), data.get('tags',''),
-                          data.get('resolution',''), data.get('camera',''),
-                          data.get('duration','')))
-                self.conn.commit()
+                    try:
+                        self.conn.execute("""
+                            INSERT INTO clips_fts(rowid,title,creator,collection,tags,resolution,camera,duration)
+                            VALUES (?,?,?,?,?,?,?,?)
+                        """, (rowid,
+                              data.get('title',''), data.get('creator',''),
+                              data.get('collection',''), data.get('tags',''),
+                              data.get('resolution',''), data.get('camera',''),
+                              data.get('duration','')))
+                        self.conn.commit()
+                    except Exception as fts_err:
+                        err_s = str(fts_err).lower()
+                        if 'malformed' in err_s or 'corrupt' in err_s:
+                            self._fts_recover()
+                        else:
+                            print(f"[DB WARN] FTS insert failed for {data.get('clip_id','?')}: {fts_err}")
                 return is_new
         except Exception as e:
             print(f"[DB WARN] save_clip failed for {data.get('clip_id','?')}: {e}")
@@ -620,21 +975,12 @@ class DB:
         try:
             with self._lock:
                 self.conn.execute(f"UPDATE clips SET {', '.join(sets)} WHERE clip_id=?", vals)
-                # Also re-index FTS
-                row = self.conn.execute(
-                    "SELECT id,title,creator,collection,tags,resolution,camera,duration FROM clips WHERE clip_id=?",
-                    (clip_id,)).fetchone()
-                if row:
-                    self.conn.execute("DELETE FROM clips_fts WHERE rowid=?", (row['id'],))
-                    self.conn.execute("""
-                        INSERT INTO clips_fts(rowid,title,creator,collection,tags,resolution,camera,duration)
-                        VALUES (?,?,?,?,?,?,?,?)
-                    """, (row['id'], row['title'] or '', row['creator'] or '',
-                          row['collection'] or '', row['tags'] or '',
-                          row['resolution'] or '', row['camera'] or '', row['duration'] or ''))
                 self.conn.commit()
         except Exception as e:
-            print(f"[DB WARN] update_metadata failed for {clip_id}: {e}")
+            print(f"[DB WARN] update_metadata UPDATE failed for {clip_id}: {e}")
+            return
+        # Re-index FTS separately — auto-recovers on corruption
+        self._fts_safe_reindex(clip_id)
 
     def search(self, query='', filters=None, limit=3000, offset=0):
         """
@@ -676,7 +1022,11 @@ class DB:
         try:
             with self._lock:
                 return self.conn.execute(sql, params).fetchall()
-        except Exception:
+        except Exception as e:
+            err_s = str(e).lower()
+            if 'malformed' in err_s or 'corrupt' in err_s:
+                self._fts_recover()
+            # Fallback: plain query without FTS
             with self._lock:
                 return self.conn.execute(
                     "SELECT * FROM clips ORDER BY found_at DESC LIMIT ? OFFSET ?",
@@ -702,7 +1052,7 @@ class DB:
     _VALID_COLUMNS = frozenset({
         'creator','collection','resolution','frame_rate','dl_status',
         'title','tags','camera','duration','formats','clip_id',
-        'user_rating','user_tags','favorited',
+        'user_rating','user_tags','favorited','source_site',
     })
 
     def distinct_values(self, col):
@@ -721,6 +1071,14 @@ class DB:
         return {'clips': self.clip_count(), 'm3u8': self.m3u8_count(),
                 'processed': self.proc_count(), 'failed': self.fail_count(),
                 'queued': self.queue_size()}
+
+    def wal_checkpoint(self):
+        """Truncate the WAL file to prevent unbounded growth during long sessions."""
+        try:
+            with self._lock:
+                self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except Exception:
+            pass
 
     def all_clips(self, limit=50000):
         return self.execute("SELECT * FROM clips ORDER BY found_at ASC LIMIT ?", (limit,)).fetchall()
@@ -778,22 +1136,12 @@ class DB:
         try:
             with self._lock:
                 self.conn.execute("UPDATE clips SET user_tags=? WHERE clip_id=?", (str(tags), clip_id))
-                # Re-index FTS to include user_tags in search
-                row = self.conn.execute(
-                    "SELECT id,title,creator,collection,tags,resolution,camera,duration,user_tags FROM clips WHERE clip_id=?",
-                    (clip_id,)).fetchone()
-                if row:
-                    all_tags = ', '.join(filter(None, [row['tags'] or '', row['user_tags'] or '']))
-                    self.conn.execute("DELETE FROM clips_fts WHERE rowid=?", (row['id'],))
-                    self.conn.execute("""
-                        INSERT INTO clips_fts(rowid,title,creator,collection,tags,resolution,camera,duration)
-                        VALUES (?,?,?,?,?,?,?,?)
-                    """, (row['id'], row['title'] or '', row['creator'] or '',
-                          row['collection'] or '', all_tags,
-                          row['resolution'] or '', row['camera'] or '', row['duration'] or ''))
                 self.conn.commit()
         except Exception as e:
-            print(f"[DB WARN] set_user_tags failed for {clip_id}: {e}")
+            print(f"[DB WARN] set_user_tags UPDATE failed for {clip_id}: {e}")
+            return
+        # Re-index FTS separately — auto-recovers on corruption
+        self._fts_safe_reindex(clip_id)
 
     def toggle_favorite(self, clip_id):
         """Toggle favorited state. Returns new state (0 or 1)."""
@@ -809,7 +1157,7 @@ class DB:
 
     # ── Collections ────────────────────────────────────────────────────────
 
-    def create_collection(self, name, color='#89b4fa'):
+    def create_collection(self, name, color='#3d8af7'):
         try:
             with self._lock:
                 self.conn.execute("INSERT OR IGNORE INTO collections(name,color) VALUES(?,?)", (name, color))
@@ -891,7 +1239,7 @@ class DB:
     def search_assets(self, query='', filters=None, mode='OR',
                       favorites_only=False, downloaded_only=False,
                       duration_range=None, collection_id=None,
-                      min_rating=0, limit=3000, offset=0):
+                      min_rating=0, sort_by='', limit=3000, offset=0):
         """
         Asset-oriented search with AND/OR mode, favorites, downloaded,
         duration range, collection filter, and rating filter.
@@ -971,7 +1319,25 @@ class DB:
                 params += [lo, hi]
 
         # Sort order
-        if query and query.strip() and not collection_id:
+        _SORT_MAP = {
+            'newest':      'c.found_at DESC',
+            'oldest':      'c.found_at ASC',
+            'title_az':    'c.title ASC',
+            'title_za':    'c.title DESC',
+            'resolution':  "CAST(REPLACE(SUBSTR(c.resolution, INSTR(c.resolution,'x')+1),' ','') AS INTEGER) DESC",
+            'duration_short': """CASE WHEN c.duration LIKE '%:%' THEN
+                CAST(SUBSTR(c.duration,1,INSTR(c.duration,':')-1) AS REAL)*60 +
+                CAST(SUBSTR(c.duration,INSTR(c.duration,':')+1) AS REAL)
+                ELSE 0 END ASC""",
+            'duration_long': """CASE WHEN c.duration LIKE '%:%' THEN
+                CAST(SUBSTR(c.duration,1,INSTR(c.duration,':')-1) AS REAL)*60 +
+                CAST(SUBSTR(c.duration,INSTR(c.duration,':')+1) AS REAL)
+                ELSE 0 END DESC""",
+            'rating':      'c.user_rating DESC, c.found_at DESC',
+        }
+        if sort_by and sort_by in _SORT_MAP:
+            base += f" ORDER BY {_SORT_MAP[sort_by]}"
+        elif query and query.strip() and not collection_id:
             base += " ORDER BY rank"
         else:
             base += " ORDER BY c.found_at DESC"
@@ -981,7 +1347,10 @@ class DB:
         try:
             with self._lock:
                 return self.conn.execute(base, params).fetchall()
-        except Exception:
+        except Exception as e:
+            err_s = str(e).lower()
+            if 'malformed' in err_s or 'corrupt' in err_s:
+                self._fts_recover()
             # Fallback
             with self._lock:
                 return self.conn.execute(
@@ -990,19 +1359,43 @@ class DB:
 
     def clear_all(self):
         with self._lock:
-            self.conn.executescript("""
-                DELETE FROM clips; DELETE FROM clips_fts;
-                DELETE FROM crawled_pages; DELETE FROM crawl_queue;
-                DELETE FROM clip_collections; DELETE FROM collections;
-                DELETE FROM saved_searches;
-            """)
+            try:
+                self.conn.executescript("""
+                    DELETE FROM clips;
+                    DELETE FROM crawled_pages; DELETE FROM crawl_queue;
+                    DELETE FROM clip_collections; DELETE FROM collections;
+                    DELETE FROM saved_searches;
+                """)
+            except Exception as e:
+                print(f"[DB WARN] clear_all partial failure: {e}")
+            # FTS: DROP+recreate is safest (handles corruption)
+            try:
+                self.conn.execute("DROP TABLE IF EXISTS clips_fts")
+                self.conn.execute("""
+                    CREATE VIRTUAL TABLE clips_fts USING fts5(
+                        title, creator, collection, tags, resolution, camera, duration,
+                        content='clips', content_rowid='id',
+                        tokenize='porter unicode61'
+                    )
+                """)
+            except Exception as e:
+                print(f"[DB WARN] clear_all FTS recreate failed: {e}")
             self.conn.commit()
 
     def rebuild_fts(self):
-        """Rebuild the FTS5 index from scratch. Call if search seems out of sync."""
+        """Nuclear FTS rebuild — DROP + recreate + repopulate.
+        Handles corruption where even DELETE FROM clips_fts fails."""
         try:
             with self._lock:
-                self.conn.execute("DELETE FROM clips_fts")
+                # Nuclear: DROP corrupted table entirely, then recreate
+                self.conn.execute("DROP TABLE IF EXISTS clips_fts")
+                self.conn.execute("""
+                    CREATE VIRTUAL TABLE clips_fts USING fts5(
+                        title, creator, collection, tags, resolution, camera, duration,
+                        content='clips', content_rowid='id',
+                        tokenize='porter unicode61'
+                    )
+                """)
                 self.conn.execute("""
                     INSERT INTO clips_fts(rowid, title, creator, collection, tags,
                                           resolution, camera, duration)
@@ -1015,11 +1408,57 @@ class DB:
                 """)
                 self.conn.commit()
                 count = self.conn.execute("SELECT COUNT(*) FROM clips_fts").fetchone()[0]
-                print(f"[DB] FTS index rebuilt: {count} rows indexed")
+                print(f"[DB] FTS index rebuilt (DROP+recreate): {count} rows indexed")
                 return count
         except Exception as e:
             print(f"[DB ERROR] FTS rebuild failed: {e}")
             return -1
+
+    _fts_recovering = False  # prevent recursive recovery
+
+    def _fts_recover(self):
+        """Auto-recover from FTS corruption. Called when 'disk image is malformed' detected."""
+        if self._fts_recovering:
+            return False
+        self._fts_recovering = True
+        print("[DB] FTS corruption detected — running automatic recovery...")
+        try:
+            result = self.rebuild_fts()
+            self._fts_recovering = False
+            return result >= 0
+        except Exception as e:
+            self._fts_recovering = False
+            print(f"[DB ERROR] FTS auto-recovery failed: {e}")
+            return False
+
+    def _fts_safe_reindex(self, clip_id):
+        """Re-index a single clip in FTS with auto-recovery on corruption."""
+        try:
+            with self._lock:
+                row = self.conn.execute(
+                    "SELECT id,title,creator,collection,tags,resolution,camera,duration,user_tags "
+                    "FROM clips WHERE clip_id=?",
+                    (clip_id,)).fetchone()
+                if not row:
+                    return
+                try:
+                    self.conn.execute("DELETE FROM clips_fts WHERE rowid=?", (row['id'],))
+                except Exception:
+                    pass  # Row may not exist, or table may be corrupted — handled below
+                all_tags = ', '.join(filter(None, [row['tags'] or '', row['user_tags'] or '']))
+                self.conn.execute("""
+                    INSERT INTO clips_fts(rowid,title,creator,collection,tags,resolution,camera,duration)
+                    VALUES (?,?,?,?,?,?,?,?)
+                """, (row['id'], row['title'] or '', row['creator'] or '',
+                      row['collection'] or '', all_tags,
+                      row['resolution'] or '', row['camera'] or '', row['duration'] or ''))
+                self.conn.commit()
+        except Exception as e:
+            err = str(e).lower()
+            if 'malformed' in err or 'corrupt' in err or 'fts' in err:
+                self._fts_recover()
+            else:
+                print(f"[DB WARN] _fts_safe_reindex failed for {clip_id}: {e}")
 
     def close(self): self.conn.close()
 
@@ -1210,11 +1649,11 @@ SiteProfile.register(SiteProfile(
     scroll_items=True,
     metadata_selectors={
         'clip_id':    r'Clip\s+ID\s+(\d+)',
-        'resolution': r'Resolution\s+([\d]{3,4}\s*[xX\u00d7]\s*[\d]{3,4})',
-        'duration':   r'Length\s+([\d:]{4,8})',
-        'frame_rate': r'Frame\s+Rate\s+(\d+)',
-        'camera':     r'Camera\s+([^\n\r]{2,50}?)(?:\n|\r|Available)',
-        'formats':    r'Available\s+Formats\s+((?:(?:HD|SD|4K|2K|ProRes|MP4|MOV|RAW)\s*)+)',
+        'resolution': r'Resolution[\s\n]+([\d]{3,5}\s*[xX\u00d7]\s*[\d]{3,5})',
+        'duration':   r'Length[\s\n]+([\d:]{4,8})',
+        'frame_rate': r'Frame\s+Rate[\s\n]+(\d+)',
+        'camera':     r'Camera[\s\n]+([^\n\r]{2,50}?)(?:\n|\r|Available)',
+        'formats':    r'Available\s+Formats[\s\n]+((?:(?:HD|SD|4K|2K|ProRes|MP4|MOV|RAW)\s*)+)',
         'creator':    r'Clip by\s*\n?\s*([^\n\r]{2,50})',
         'collection': r'Part of\s*\n?\s*([^\n\r]{2,60})',
         'tags':       r'Tags\s*\n((?:.+\n?){1,25}?)(?:Related|Part of|Clip by|Similar|Explore|$)',
@@ -1701,7 +2140,30 @@ class CrawlerWorker(QThread):
                 vid_m = re.search(r'/video-files/(\d+)/', url)
                 if vid_m and vid_m.group(1) != current_id:
                     return  # Skip — this is a related video's preview, not our clip
+                if not vid_m and clip_meta.get('m3u8_url'):
+                    return  # Can't verify + already have a video URL — skip related preview
+
+            # ── M3U8 master playlist: extract resolution from RESOLUTION= ──
+            if '.m3u8' in url.lower():
+                try:
+                    body = await response.text()
+                    resolutions = re.findall(r'RESOLUTION=(\d{3,5})x(\d{3,5})', body)
+                    if resolutions:
+                        # Pick highest resolution variant
+                        best_w, best_h = max(resolutions, key=lambda r: int(r[0]) * int(r[1]))
+                        if not clip_meta.get('resolution'):
+                            clip_meta['resolution'] = f"{best_w}x{best_h}"
+                        # Also extract frame rate if available
+                        fps_m = re.search(r'FRAME-RATE=([\d.]+)', body)
+                        if fps_m and not clip_meta.get('frame_rate'):
+                            clip_meta['frame_rate'] = fps_m.group(1).split('.')[0]
+                except Exception:
+                    pass  # Non-text response or read error
+
             await self._record_video_url(url.strip(), source_url, clip_meta)
+            # Mark that we have a video URL so subsequent unverifiable responses are skipped
+            if not clip_meta.get('m3u8_url'):
+                clip_meta['m3u8_url'] = url.strip()
             return
 
         # For body scanning: only small JSON responses (API calls that may embed URLs)
@@ -1754,6 +2216,11 @@ class CrawlerWorker(QThread):
             meta['resolution'] = f"{w}x{h}"
             meta['frame_rate'] = fps
             quality_label = f"{max(w,h)}p"
+        elif meta.get('resolution'):
+            # Resolution from M3U8 master playlist or metadata extraction
+            res_parts = re.match(r'(\d+)x(\d+)', meta['resolution'])
+            if res_parts:
+                quality_label = f"{max(int(res_parts.group(1)), int(res_parts.group(2)))}p"
         qual_m = re.search(r'-(uhd|hd|sd)_', url, re.IGNORECASE)
         if qual_m:
             meta['formats'] = qual_m.group(1).upper()
@@ -2071,6 +2538,11 @@ class CrawlerWorker(QThread):
                     meta['m3u8_url'] = src
                     if vid_m:
                         meta['clip_id'] = vid_m.group(1)
+                    elif item.get('href'):
+                        # Fallback: extract clip ID from linked clip page URL
+                        href_id_m = re.search(r'/(\d{4,})(?:/|$)', item['href'])
+                        if href_id_m:
+                            meta['clip_id'] = href_id_m.group(1)
                     res_m = re.search(r'(\d{3,4})_(\d{3,4})_(\d+)fps', src)
                     if res_m:
                         meta['resolution'] = f"{res_m.group(1)}x{res_m.group(2)}"
@@ -2314,14 +2786,26 @@ class CrawlerWorker(QThread):
                         "DEBUG")
                 await self._record_video_url(best, source_url, clip_meta)
             elif current_clip_id:
-                # Our clip ID wasn't found in any video URL — try unknown bucket
-                self.log(
-                    f"  [scan] WARNING: clip id:{current_clip_id} not found in "
-                    f"{total_ids} video IDs. Recording all {len(found_urls)} URLs.",
-                    "WARN")
-                for vid_id, urls in by_vid_id.items():
-                    best = self._pick_best_quality(urls)
+                # Clip ID not in any video URL — common for sites like Artlist
+                # where HLS URLs don't encode the clip ID.
+                unknown_urls = by_vid_id.get('__unknown__', [])
+                if total_ids == 1 and len(unknown_urls) <= 3:
+                    # Only __unknown__ group with very few URLs → likely our clip
+                    self.log(
+                        f"  [scan] {len(unknown_urls)} untagged URL(s) — "
+                        f"assuming clip id:{current_clip_id}",
+                        "DEBUG")
+                    best = self._pick_best_quality(unknown_urls)
                     await self._record_video_url(best, source_url, clip_meta)
+                else:
+                    # Many URLs without clip ID → related video previews.
+                    # Response interceptor already captured the real video URL,
+                    # so skip scan recording to avoid polluting DB.
+                    self.log(
+                        f"  [scan] Skipping {len(found_urls)} URLs across "
+                        f"{total_ids} groups — no clip ID match, response "
+                        f"interceptor has the primary video.",
+                        "DEBUG")
             else:
                 # No clip ID context (catalog page or generic) — record all
                 self.log(
@@ -2471,6 +2955,7 @@ class CrawlerWorker(QThread):
             current_id = clip_meta.get('clip_id', '')
             recorded = 0
             skipped = 0
+            unverifiable = 0
             for u in urls:
                 if u and isinstance(u, str):
                     u = u.strip()
@@ -2482,11 +2967,15 @@ class CrawlerWorker(QThread):
                         if vid_m and vid_m.group(1) != current_id:
                             skipped += 1
                             continue
+                        if not vid_m:
+                            unverifiable += 1
+                            continue  # Can't verify ownership — skip
                     await self._record_video_url(u, source_url, clip_meta)
                     recorded += 1
-            if recorded or skipped:
+            if recorded or skipped or unverifiable:
                 self.log(
-                    f"  [js-intercept] {recorded} recorded, {skipped} skipped (other clips' previews)",
+                    f"  [js-intercept] {recorded} recorded, {skipped} skipped "
+                    f"(other clips), {unverifiable} skipped (unverifiable)",
                     "DEBUG")
         except Exception as e:
             self.log(f"JS intercept collection error: {str(e)[:80]}", "DEBUG")
@@ -2623,11 +3112,11 @@ class StarRating(QWidget):
         s = self._star_size
         for i in range(5):
             if i < display:
-                p.setPen(QColor('#f9e2af'))
-                p.setBrush(QBrush(QColor('#f9e2af')))
+                p.setPen(QColor(C('warning')))
+                p.setBrush(QBrush(QColor(C('warning'))))
             else:
-                p.setPen(QColor('#45475a'))
-                p.setBrush(QBrush(QColor('#313244')))
+                p.setPen(QColor(C('border_light')))
+                p.setBrush(QBrush(QColor(C('border'))))
             cx = i * s + s // 2
             cy = s // 2 + 2
             # Draw a simple star shape
@@ -2649,8 +3138,8 @@ class ClipCard(QFrame):
     hover_enter = pyqtSignal(object, object)  # (row_data, card_widget)
     hover_leave = pyqtSignal(object)           # (card_widget,)
 
-    # (card_width, thumb_height)  for size-index 0=S 1=M 2=L
-    SIZES = [(160, 90), (200, 112), (240, 135)]
+    # (card_width, thumb_height)  for size-index 0=S 1=M 2=L 3=XL
+    SIZES = [(160, 90), (200, 112), (240, 135), (320, 180)]
 
     @staticmethod
     def _get_field(row, key):
@@ -2684,7 +3173,7 @@ class ClipCard(QFrame):
         self.setMouseTracking(True)
 
         vlay = QVBoxLayout(self)
-        vlay.setContentsMargins(0, 0, 0, 8)
+        vlay.setContentsMargins(0,0,0,Z(8))
         vlay.setSpacing(0)
 
         # ── Thumbnail ─────────────────────────────────────────────────────
@@ -2692,7 +3181,7 @@ class ClipCard(QFrame):
         self.thumb_label.setFixedSize(cw, th)
         self.thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.thumb_label.setStyleSheet(
-            f"background:#11111b; border-radius:7px 7px 0 0; border:none;")
+            f"background:{C('bg_video')}; border-radius:{Z(7)}px {Z(7)}px 0 0; border:none;")
         self._cw, self._th = cw, th
         self._set_placeholder()
         vlay.addWidget(self.thumb_label)
@@ -2701,16 +3190,16 @@ class ClipCard(QFrame):
         content = QWidget()
         content.setStyleSheet("background:transparent;")
         clay = QVBoxLayout(content)
-        clay.setContentsMargins(8, 5, 8, 0)
-        clay.setSpacing(2)
+        clay.setContentsMargins(Z(8),Z(5),Z(8),0)
+        clay.setSpacing(Z(2))
 
         # Title (2 lines max)
         title = _g('title') or self._clip_id
         self.title_lbl = QLabel(title)
         self.title_lbl.setWordWrap(True)
-        self.title_lbl.setMaximumHeight(34)
+        self.title_lbl.setMaximumHeight(Z(34))
         self.title_lbl.setStyleSheet(
-            "color:#cdd6f4; font-size:11px; font-weight:700; background:transparent;")
+            f"color:{C('text')}; font-size:{Z(11)}px; font-weight:700; background:transparent;")
         self.title_lbl.setToolTip(title)
         clay.addWidget(self.title_lbl)
 
@@ -2719,36 +3208,36 @@ class ClipCard(QFrame):
         if creator:
             cl = QLabel(creator)
             cl.setStyleSheet(
-                "color:#f9e2af; font-size:10px; background:transparent;")
+                f"color:{C('warning')}; font-size:{Z(10)}px; background:transparent;")
             cl.setToolTip(creator)
             clay.addWidget(cl)
 
         # Badges row: resolution | duration | fps | fav heart | rating | status dot
-        badges = QHBoxLayout(); badges.setSpacing(3); badges.setContentsMargins(0,3,0,0)
+        badges = QHBoxLayout(); badges.setSpacing(Z(3)); badges.setContentsMargins(0,Z(3),0,0)
         # Favorite heart
         if self._favorited:
             heart = QLabel('\u2665')
-            heart.setStyleSheet("color:#f38ba8; font-size:10px; background:transparent;")
+            heart.setStyleSheet(f"color:{C('error')}; font-size:{Z(10)}px; background:transparent;")
             heart.setToolTip("Favorited")
             badges.addWidget(heart)
-        for txt, clr in [(_g('resolution'),'#cba6f7'),(_g('duration'),'#89b4fa'),(_g('frame_rate'),'#a6e3a1')]:
+        for txt, clr in [(_g('resolution'),C('purple')),(_g('duration'),C('accent')),(_g('frame_rate'),C('success'))]:
             if txt:
                 b = QLabel(txt)
                 b.setStyleSheet(
-                    f"background:{clr}22; color:{clr}; font-size:8px; "
-                    f"font-weight:700; padding:1px 5px; border-radius:3px;")
+                    f"background:{clr}22; color:{clr}; font-size:{Z(8)}px; "
+                    f"font-weight:700; padding:{Z(1)}px {Z(5)}px; border-radius:{Z(3)}px;")
                 badges.addWidget(b)
         badges.addStretch()
         # Rating stars (compact)
         if self._user_rating > 0:
             stars_text = '\u2605' * self._user_rating
             stars = QLabel(stars_text)
-            stars.setStyleSheet("color:#f9e2af; font-size:8px; background:transparent;")
+            stars.setStyleSheet(f"color:{C('warning')}; font-size:{Z(8)}px; background:transparent;")
             badges.addWidget(stars)
         ds = self._dl_status
-        dot_clr = {'done':'#a6e3a1','downloading':'#f9e2af','error':'#f38ba8'}.get(ds,'#313244')
+        dot_clr = {'done':C('success'),'downloading':C('warning'),'error':C('error')}.get(ds,C('border'))
         dot = QLabel('●')
-        dot.setStyleSheet(f"color:{dot_clr}; font-size:10px; background:transparent;")
+        dot.setStyleSheet(f"color:{dot_clr}; font-size:{Z(10)}px; background:transparent;")
         dot.setToolTip({'done':'Downloaded','downloading':'Downloading...','error':'Error','':''}.get(ds,''))
         badges.addWidget(dot)
         clay.addLayout(badges)
@@ -2757,11 +3246,11 @@ class ClipCard(QFrame):
         tags_raw = _g('tags')
         tags = [t.strip() for t in tags_raw.split(',') if t.strip()][:5]
         if tags:
-            trow = QHBoxLayout(); trow.setSpacing(3); trow.setContentsMargins(0,3,0,0)
+            trow = QHBoxLayout(); trow.setSpacing(Z(3)); trow.setContentsMargins(0,Z(3),0,0)
             for t in tags:
                 tb = QPushButton(t[:18])
                 tb.setObjectName('tag-chip')
-                tb.setFixedHeight(16)
+                tb.setFixedHeight(Z(16))
                 tb.clicked.connect(lambda _=False, tag=t: self.tag_clicked.emit(tag))
                 trow.addWidget(tb)
             trow.addStretch()
@@ -2769,23 +3258,30 @@ class ClipCard(QFrame):
 
         vlay.addWidget(content)
 
-        # Load thumb if available
-        tp = _g('thumb_path') if 'thumb_path' in keys else ''
+        # Defer thumb loading — store path for lazy load
+        self._pending_thumb = None
+        tp = _g('thumb_path')
         if tp and os.path.isfile(tp):
-            self.set_thumb(tp)
+            self._pending_thumb = tp
         elif thumb_dir and self._clip_id:
             candidate = os.path.join(thumb_dir, f"{self._clip_id}.jpg")
             if os.path.isfile(candidate):
-                self.set_thumb(candidate)
+                self._pending_thumb = candidate
+
+    def load_deferred_thumb(self):
+        """Load the thumbnail if it was deferred during construction."""
+        if self._pending_thumb:
+            self.set_thumb(self._pending_thumb)
+            self._pending_thumb = None
 
     def _set_placeholder(self):
         pm = QPixmap(self._cw, self._th)
-        pm.fill(QColor('#11111b'))
+        pm.fill(QColor(C('bg_deep')))
         # Draw a subtle film-frame icon
         painter = QPainter(pm)
-        painter.setPen(QColor('#313244'))
+        painter.setPen(QColor(C('border')))
         painter.drawRect(self._cw//2-16, self._th//2-12, 32, 24)
-        painter.setPen(QColor('#45475a'))
+        painter.setPen(QColor(C('border_light')))
         painter.drawText(QRect(0, 0, self._cw, self._th),
                          Qt.AlignmentFlag.AlignCenter, '▶')
         painter.end()
@@ -2800,7 +3296,7 @@ class ClipCard(QFrame):
                            Qt.AspectRatioMode.KeepAspectRatio,
                            Qt.TransformationMode.SmoothTransformation)
             canvas = QPixmap(self._cw, self._th)
-            canvas.fill(QColor('#11111b'))
+            canvas.fill(QColor(C('bg_deep')))
             painter = QPainter(canvas)
             x = (self._cw - pm.width()) // 2
             y = (self._th - pm.height()) // 2
@@ -2825,7 +3321,7 @@ class ClipCard(QFrame):
             if not self._hover_video:
                 self._hover_video = QVideoWidget(self.thumb_label)
                 self._hover_video.setGeometry(0, 0, self._cw, self._th)
-                self._hover_video.setStyleSheet("background:#11111b; border-radius:7px 7px 0 0;")
+                self._hover_video.setStyleSheet(f"background:{C('bg_video')}; border-radius:{Z(7)}px {Z(7)}px 0 0;")
                 self._hover_audio = QAudioOutput()
                 self._hover_audio.setVolume(0.0)  # muted on hover
                 self._hover_player = QMediaPlayer()
@@ -2954,6 +3450,196 @@ class ThumbnailWorker(QThread):
         except Exception:
             return False
 
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# IMPORT WORKER — scan local folder and add videos to DB
+# ─────────────────────────────────────────────────────────────────────────────
+
+_VIDEO_EXTENSIONS = frozenset({
+    '.mp4', '.webm', '.mkv', '.avi', '.mov', '.m4v', '.flv', '.wmv', '.ts', '.mts',
+})
+
+class ImportWorker(QThread):
+    """Scans a folder for video files, extracts metadata via ffprobe, imports into DB."""
+    log_signal      = pyqtSignal(str)
+    progress_signal = pyqtSignal(int, int)       # current, total
+    clip_signal     = pyqtSignal(dict)            # each imported clip
+    finished        = pyqtSignal(int)             # total imported count
+
+    def __init__(self, folder, db, thumb_dir, recursive=True):
+        super().__init__()
+        self.folder     = folder
+        self.db         = db
+        self.thumb_dir  = thumb_dir
+        self.recursive  = recursive
+        self._stop      = threading.Event()
+
+    def stop(self): self._stop.set()
+
+    def run(self):
+        import hashlib
+        ffmpeg = _get_ffmpeg()
+        # Resolve ffprobe path from ffmpeg path
+        ffprobe = self._find_ffprobe(ffmpeg)
+
+        # Scan for video files
+        video_files = []
+        if self.recursive:
+            for root, dirs, files in os.walk(self.folder):
+                if self._stop.is_set(): break
+                for f in files:
+                    if os.path.splitext(f)[1].lower() in _VIDEO_EXTENSIONS:
+                        video_files.append(os.path.join(root, f))
+        else:
+            for f in os.listdir(self.folder):
+                fp = os.path.join(self.folder, f)
+                if os.path.isfile(fp) and os.path.splitext(f)[1].lower() in _VIDEO_EXTENSIONS:
+                    video_files.append(fp)
+
+        total = len(video_files)
+        self.log_signal.emit(f"Found {total} video files in {self.folder}")
+        if total == 0:
+            self.finished.emit(0)
+            return
+
+        imported = 0
+        os.makedirs(self.thumb_dir, exist_ok=True)
+
+        for i, fpath in enumerate(video_files):
+            if self._stop.is_set(): break
+            self.progress_signal.emit(i + 1, total)
+
+            fname = os.path.basename(fpath)
+            name_no_ext = os.path.splitext(fname)[0]
+            ext = os.path.splitext(fname)[1].lower()
+
+            # Generate a stable clip_id from the absolute path
+            clip_id = 'local_' + hashlib.md5(os.path.abspath(fpath).encode()).hexdigest()[:12]
+
+            # Check if already in DB (by clip_id or local_path)
+            existing = self.db.execute(
+                "SELECT clip_id FROM clips WHERE clip_id=? OR local_path=?",
+                (clip_id, fpath)).fetchone()
+            if existing:
+                continue
+
+            # Extract metadata via ffprobe
+            meta = self._probe(ffprobe, fpath)
+
+            # Clean title from filename
+            title = name_no_ext.replace('_', ' ').replace('-', ' ').strip()
+
+            clip_data = {
+                'clip_id':      clip_id,
+                'source_url':   '',
+                'title':        title,
+                'creator':      '',
+                'collection':   os.path.basename(os.path.dirname(fpath)),
+                'resolution':   meta.get('resolution', ''),
+                'duration':     meta.get('duration', ''),
+                'frame_rate':   meta.get('fps', ''),
+                'camera':       '',
+                'formats':      ext.lstrip('.').upper(),
+                'tags':         '',
+                'm3u8_url':     '',
+                'thumbnail_url':'',
+                'source_site':  'Local Import',
+            }
+
+            is_new = self.db.save_clip(clip_data)
+            if is_new:
+                # Set local_path and dl_status so it shows as downloaded
+                self.db.update_local_path(clip_id, fpath, 'done')
+                imported += 1
+                self.clip_signal.emit(clip_data)
+
+                # Generate thumbnail
+                thumb_path = os.path.join(self.thumb_dir, f"{clip_id}.jpg")
+                if not os.path.isfile(thumb_path):
+                    self._extract_thumb(ffmpeg, fpath, thumb_path)
+                if os.path.isfile(thumb_path) and os.path.getsize(thumb_path) > 0:
+                    self.db.update_thumb_path(clip_id, thumb_path)
+
+                if imported % 25 == 0:
+                    self.log_signal.emit(f"Imported {imported} / {i+1} scanned...")
+
+        self.log_signal.emit(f"Import complete: {imported} new clips from {total} files")
+        self.finished.emit(imported)
+
+    def _find_ffprobe(self, ffmpeg_path):
+        """Derive ffprobe path from ffmpeg path."""
+        import shutil
+        # Try sibling binary
+        if ffmpeg_path and os.path.isfile(ffmpeg_path):
+            d = os.path.dirname(ffmpeg_path)
+            for name in ('ffprobe', 'ffprobe.exe'):
+                candidate = os.path.join(d, name)
+                if os.path.isfile(candidate):
+                    return candidate
+        return shutil.which('ffprobe') or 'ffprobe'
+
+    def _probe(self, ffprobe, fpath):
+        """Extract resolution, duration, fps from a video file."""
+        meta = {}
+        try:
+            cmd = [
+                ffprobe, '-v', 'quiet',
+                '-print_format', 'json',
+                '-show_format', '-show_streams',
+                fpath
+            ]
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            if r.returncode != 0:
+                return meta
+            info = json.loads(r.stdout)
+
+            # Find video stream
+            for s in info.get('streams', []):
+                if s.get('codec_type') == 'video':
+                    w = s.get('width', 0)
+                    h = s.get('height', 0)
+                    if w and h:
+                        meta['resolution'] = f"{w}x{h}"
+                    # FPS
+                    fps_str = s.get('r_frame_rate', '')
+                    if fps_str and '/' in fps_str:
+                        num, den = fps_str.split('/')
+                        try:
+                            fps_val = round(int(num) / int(den))
+                            if 1 < fps_val < 999:
+                                meta['fps'] = str(fps_val)
+                        except (ValueError, ZeroDivisionError):
+                            pass
+                    break
+
+            # Duration
+            dur = info.get('format', {}).get('duration', '')
+            if dur:
+                try:
+                    secs = float(dur)
+                    mins = int(secs) // 60
+                    sec_r = int(secs) % 60
+                    meta['duration'] = f"{mins}:{sec_r:02d}"
+                except ValueError:
+                    pass
+        except Exception:
+            pass
+        return meta
+
+    def _extract_thumb(self, ffmpeg, video_path, out_path):
+        """Extract a single thumbnail frame from a video file."""
+        try:
+            cmd = [ffmpeg, '-y',
+                   '-ss', '3',
+                   '-i', video_path,
+                   '-frames:v', '1',
+                   '-vf', 'thumbnail,scale=320:-1',
+                   '-q:v', '3',
+                   out_path]
+            subprocess.run(cmd, capture_output=True, timeout=30)
+        except Exception:
+            pass
 
 
 # Column definitions — retained for reference and export
@@ -3158,34 +3844,66 @@ class DownloadWorker(QThread):
         self.all_done.emit()
 
     def _download_one_with_retry(self, clip, ffmpeg):
-        """Download a single clip with exponential backoff retry."""
+        """Download a single clip with smart retry — skips retries for permanent failures."""
         import time as _time
         clip_id = str(clip.get('clip_id', '') or '')
-        last_err = ""
+
         for attempt in range(self.max_retries + 1):
             if self._stop.is_set():
                 return
             if attempt > 0:
-                wait = min(2 ** attempt, 30)
+                wait = min(2 ** attempt, 15)  # cap at 15s (was 30)
                 self.log(f"Retry {attempt}/{self.max_retries} for [{clip_id}] in {wait}s", "WARN")
                 self.progress_signal.emit(clip_id, 0, f"Retry {attempt} in {wait}s...")
                 _time.sleep(wait)
                 if self._stop.is_set():
                     return
 
-            success = self._download_one(clip, ffmpeg)
-            if success:
+            result = self._download_one(clip, ffmpeg)
+            if result == 'ok':
                 return
-            last_err = f"attempt {attempt+1} failed"
+            if result == 'permanent':
+                # URL expired/dead/403/404 — retrying won't help
+                self.db.set_dl_status(clip_id, 'error')
+                self.log(f"Permanent failure [{clip_id}] — skipping retries", "ERROR")
+                self.clip_done.emit(clip_id, False, "URL expired or unreachable")
+                return
 
-        # All retries exhausted
+        # All retries exhausted (transient failures only reach here)
         self.db.set_dl_status(clip_id, 'error')
         self.progress_signal.emit(clip_id, 0, f"Failed after {self.max_retries+1} attempts")
         self.log(f"Gave up [{clip_id}] after {self.max_retries+1} attempts", "ERROR")
         self.clip_done.emit(clip_id, False, f"Failed after {self.max_retries+1} attempts")
 
+    @staticmethod
+    def _head_check_url(url, timeout=8):
+        """Quick HTTP HEAD/GET check. Returns (ok, reason).
+        Catches expired CDN URLs in ~1s instead of letting ffmpeg hang for minutes."""
+        import urllib.request, urllib.error
+        try:
+            req = urllib.request.Request(url, method='HEAD')
+            req.add_header('User-Agent', 'Mozilla/5.0')
+            resp = urllib.request.urlopen(req, timeout=timeout)
+            code = resp.getcode()
+            resp.close()
+            if code and code >= 400:
+                return False, f"HTTP {code}"
+            return True, "ok"
+        except urllib.error.HTTPError as e:
+            return False, f"HTTP {e.code}"
+        except urllib.error.URLError as e:
+            # Could be DNS or connection issue — might be transient
+            reason = str(getattr(e, 'reason', e))
+            if 'timed out' in reason.lower() or 'timeout' in reason.lower():
+                return False, "timeout"
+            return False, f"URL error: {reason[:60]}"
+        except Exception as e:
+            return False, f"check failed: {str(e)[:60]}"
+
+    _FFMPEG_PROCESS_TIMEOUT = 180   # kill ffmpeg if no progress for 3 minutes
+
     def _download_one(self, clip, ffmpeg):
-        """Download a single clip. Returns True on success, False on failure."""
+        """Download a single clip. Returns 'ok', 'permanent', or 'transient'."""
         import time as _time
         clip_id      = str(clip.get('clip_id', '') or '')
         m3u8_url     = str(clip.get('m3u8_url','') or '')
@@ -3201,7 +3919,7 @@ class DownloadWorker(QThread):
                         self.log(f"[DL] SKIP id:{clip_id} — already downloaded: {check['local_path']}", "INFO")
                         self.progress_signal.emit(clip_id, 100, "Already downloaded")
                         self.clip_done.emit(clip_id, True, check['local_path'])
-                        return True
+                        return 'ok'
                     # Use latest m3u8_url from DB (may have been upgraded to HD/UHD)
                     if check['m3u8_url']:
                         m3u8_url = check['m3u8_url']
@@ -3211,9 +3929,9 @@ class DownloadWorker(QThread):
         # Poll DB until title is populated (metadata extraction runs after M3U8 fires).
         fresh = None
         if clip_id:
-            for _attempt in range(30):          # 30 x 0.5s = 15s max wait
+            for _attempt in range(12):          # 12 x 0.5s = 6s max wait (was 15s)
                 if self._stop.is_set():
-                    return False
+                    return 'transient'
                 try:
                     fresh = self.db.execute(
                         "SELECT * FROM clips WHERE clip_id=?", (clip_id,)).fetchone()
@@ -3229,7 +3947,32 @@ class DownloadWorker(QThread):
 
         if not m3u8_url:
             self.log(f"[DL] SKIP id:{clip_id} — no video URL", "WARN")
-            return False
+            return 'permanent'
+
+        # ── HTTP HEAD pre-check — catch expired URLs in ~1s ──────────
+        self.progress_signal.emit(clip_id, 0, "Checking URL...")
+        url_ok, url_reason = self._head_check_url(m3u8_url)
+        if not url_ok:
+            http_code = 0
+            code_match = re.search(r'HTTP (\d+)', url_reason)
+            if code_match:
+                http_code = int(code_match.group(1))
+
+            # 403/404/410/451 = expired CDN token / deleted — permanent
+            if http_code in (403, 404, 410, 451):
+                self.progress_signal.emit(clip_id, 0, f"URL expired ({url_reason})")
+                self.log(f"[DL] SKIP id:{clip_id} — {url_reason} (permanent)", "WARN")
+                return 'permanent'
+            # Timeout or 5xx = maybe transient
+            elif 'timeout' in url_reason.lower() or (500 <= http_code < 600):
+                self.progress_signal.emit(clip_id, 0, f"URL unreachable ({url_reason})")
+                self.log(f"[DL] URL check failed id:{clip_id} — {url_reason} (transient)", "WARN")
+                return 'transient'
+            else:
+                # Unknown error — treat as permanent to avoid wasting time
+                self.progress_signal.emit(clip_id, 0, f"URL dead ({url_reason})")
+                self.log(f"[DL] SKIP id:{clip_id} — {url_reason} (permanent)", "WARN")
+                return 'permanent'
 
         total_secs = self._parse_duration(duration_str)
         fn_tpl    = self._fn_template
@@ -3245,7 +3988,19 @@ class DownloadWorker(QThread):
             self.db.update_local_path(clip_id, out_path, 'done')
             self.progress_signal.emit(clip_id, 100, "File exists")
             self.clip_done.emit(clip_id, True, out_path)
-            return True
+            return 'ok'
+
+        # Disk space check — require at least 500 MB free before starting a download
+        try:
+            usage = shutil.disk_usage(os.path.dirname(out_path) or self.out_dir)
+            free_mb = usage.free / 1_048_576
+            if free_mb < 500:
+                self.log(f"[DL] SKIP id:{clip_id} — low disk space ({free_mb:.0f} MB free, need 500 MB)", "ERROR")
+                self.progress_signal.emit(clip_id, 0, f"Low disk space ({free_mb:.0f} MB)")
+                self.clip_done.emit(clip_id, False, f"Low disk space: {free_mb:.0f} MB free")
+                return 'permanent'
+        except Exception:
+            pass  # Can't check disk space, proceed anyway
 
         # Determine quality label for logging
         qual = '?'
@@ -3265,8 +4020,17 @@ class DownloadWorker(QThread):
         self.db.set_dl_status(clip_id, 'downloading')
 
         try:
+            # ffmpeg with aggressive timeouts:
+            #   -rw_timeout 15000000  = 15s read/write timeout per TCP operation (microseconds)
+            #   -reconnect 1          = auto-reconnect on connection drop
+            #   -reconnect_streamed 1 = reconnect even for streamed content
+            #   -reconnect_delay_max 5 = max 5s between reconnect attempts
             cmd = [
                 ffmpeg, '-y',
+                '-rw_timeout', '15000000',
+                '-reconnect', '1',
+                '-reconnect_streamed', '1',
+                '-reconnect_delay_max', '5',
                 '-protocol_whitelist', 'file,http,https,tcp,tls,crypto,hls',
                 '-i', m3u8_url,
                 '-c:v', 'copy',
@@ -3287,11 +4051,22 @@ class DownloadWorker(QThread):
             ffmpeg_duration = total_secs
             dl_start_time = _time.time()
             last_speed_update = dl_start_time
+            last_progress_time = dl_start_time  # watchdog: last time we saw progress
 
             for line in proc.stderr:
                 if self._stop.is_set():
                     proc.terminate(); break
                 line = line.strip()
+
+                # Watchdog: kill if no progress output for _FFMPEG_PROCESS_TIMEOUT
+                now = _time.time()
+                if line:
+                    last_progress_time = now
+                if now - last_progress_time > self._FFMPEG_PROCESS_TIMEOUT:
+                    self.log(f"[DL] WATCHDOG: killing hung ffmpeg for [{clip_id}] (no output for {self._FFMPEG_PROCESS_TIMEOUT}s)", "ERROR")
+                    proc.kill()
+                    break
+
                 if not ffmpeg_duration:
                     dm = re.search(r'Duration:\s*(\d+):(\d+):(\d+\.?\d*)', line)
                     if dm:
@@ -3316,7 +4091,6 @@ class DownloadWorker(QThread):
                             eta_str = f"{eta_secs/60:.1f}m left"
                         # Estimate speed from file size if available
                         if os.path.exists(out_path):
-                            now = _time.time()
                             if now - last_speed_update >= 1.0:
                                 fsize = os.path.getsize(out_path)
                                 speed_bps = fsize / wall_elapsed if wall_elapsed > 0 else 0
@@ -3332,14 +4106,14 @@ class DownloadWorker(QThread):
                     status = "  |  ".join(parts)
                     self.progress_signal.emit(clip_id, pct, status)
 
-            proc.wait()
+            proc.wait(timeout=30)
             rc = proc.returncode
 
             with self._procs_lock:
                 self._procs.pop(clip_id, None)
 
             if self._stop.is_set():
-                return False
+                return 'transient'
 
             if rc == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
                 # Report final size + speed
@@ -3366,12 +4140,28 @@ class DownloadWorker(QThread):
                 self.progress_signal.emit(clip_id, 100, done_text)
                 self.log(f"Done: {filename}  ({size_str}, {speed_final})", "OK")
                 self.clip_done.emit(clip_id, True, out_path)
-                return True
+                return 'ok'
             else:
+                # Clean up partial file
+                try:
+                    if os.path.exists(out_path) and os.path.getsize(out_path) == 0:
+                        os.remove(out_path)
+                except Exception:
+                    pass
                 err = f"ffmpeg exit {rc}"
                 self.progress_signal.emit(clip_id, 0, f"Error (exit {rc})")
                 self.log(f"Failed [{clip_id}]: {err}", "ERROR")
-                return False
+                return 'transient'
+
+        except subprocess.TimeoutExpired:
+            # proc.wait(timeout=30) expired — kill it
+            try: proc.kill()
+            except Exception: pass
+            with self._procs_lock:
+                self._procs.pop(clip_id, None)
+            self.log(f"[DL] TIMEOUT: ffmpeg hung for [{clip_id}], killed", "ERROR")
+            self.progress_signal.emit(clip_id, 0, "Timeout — ffmpeg killed")
+            return 'transient'
 
         except Exception as e:
             with self._procs_lock:
@@ -3379,7 +4169,7 @@ class DownloadWorker(QThread):
             err = str(e)
             self.progress_signal.emit(clip_id, 0, f"Error: {err[:60]}")
             self.log(f"Download error [{clip_id}]: {err}", "ERROR")
-            return False
+            return 'transient'
 
     def _parse_duration(self, s):
         """Parse 'MM:SS' or 'HH:MM:SS' to seconds."""
@@ -3416,7 +4206,7 @@ class DownloadWorker(QThread):
             with open(sidecar, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
         except Exception as e:
-            print(f"[DL WARN] Sidecar write failed for {clip_data.get('clip_id','?')}: {e}")
+            print(f"[DL WARN] Sidecar write failed for {data.get('clip_id','?')}: {e}")
 
 
     def _extract_thumb(self, clip_id, mp4_path):
@@ -3449,21 +4239,21 @@ class ToastNotification(QLabel):
     def __init__(self, parent, message, level='info', duration=3000):
         super().__init__(message, parent)
         colors = {
-            'info':    ('#89b4fa', '#1e1e2e'),
-            'success': ('#a6e3a1', '#1e1e2e'),
-            'warning': ('#f9e2af', '#1e1e2e'),
-            'error':   ('#f38ba8', '#1e1e2e'),
+            'info':    (C('accent_hover'), C('toast_info_bg')),
+            'success': (C('success'), C('toast_success_bg')),
+            'warning': (C('warning'), C('toast_warning_bg')),
+            'error':   (C('error'), C('toast_error_bg')),
         }
         fg, bg = colors.get(level, colors['info'])
         self.setStyleSheet(
-            f"background:{bg}; color:{fg}; border:1px solid {fg}; "
-            f"border-radius:6px; padding:10px 20px; font-size:12px; font-weight:600;")
+            f"background:{bg}; color:{fg}; border:1px solid {fg}40; "
+            f"border-radius:{Z(6)}px; padding:{Z(10)}px {Z(20)}px; font-size:{Z(12)}px; font-weight:600;")
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.adjustSize()
-        self.setFixedWidth(max(self.width() + 40, 280))
+        self.setFixedWidth(max(self.width() + Z(40), Z(300)))
         # Position: top-center of parent
         px = (parent.width() - self.width()) // 2
-        self.move(px, 60)
+        self.move(px, Z(60))
         self.show()
         self.raise_()
         # Fade out after duration
@@ -3492,9 +4282,9 @@ class MainWindow(QMainWindow):
         self._dl_worker      = None   # DownloadWorker instance
         self._db_path        = os.path.join(get_config_dir(), 'artlist_results.db')
 
-        self.setWindowTitle("Video Scraper  v0.7.1")
-        self.setMinimumSize(960, 600)
-        self.resize(1400, 860)
+        self.setWindowTitle("Video Scraper  v1.1.0")
+        self.setMinimumSize(Z(960), Z(600))
+        self.resize(Z(1400), Z(860))
 
         self._init_db()
         self._build_ui()
@@ -3505,9 +4295,13 @@ class MainWindow(QMainWindow):
         self._dl_done_count = 0
         self._last_rows = []
         self._thumb_worker = None
+        self._import_worker = None
         self._load_more_btn = None
         self._bg_workers = []     # prevent GC of background QThread workers
         self._active_profile = SiteProfile.get('Artlist')
+        self._catalog_mode = False
+        self._selected_cards = []  # multi-select: list of (card, row) tuples
+        self._last_click_idx = -1  # for Shift+click range selection
 
         self._do_search()
         self._update_stats()
@@ -3524,9 +4318,14 @@ class MainWindow(QMainWindow):
         self._dl_stats_timer.timeout.connect(self._update_dl_stats)
         self._dl_stats_timer.start(5000)
 
+        # Periodic WAL checkpoint to prevent unbounded WAL growth
+        self._wal_timer = QTimer()
+        self._wal_timer.timeout.connect(lambda: self.db.wal_checkpoint() if self.db else None)
+        self._wal_timer.start(120_000)  # every 2 minutes
+
         self._search_timer = QTimer()
         self._search_timer.setSingleShot(True)
-        self._search_timer.timeout.connect(self._do_search)
+        self._search_timer.timeout.connect(self._do_search_impl)
 
         # Debounce timer for clip_signal — batches UI refresh during active crawl
         self._clip_found_timer = QTimer()
@@ -3542,6 +4341,12 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+4"), self, activated=lambda: self.tabs.setCurrentIndex(3))
         QShortcut(QKeySequence("Ctrl+5"), self, activated=lambda: self.tabs.setCurrentIndex(4))
         QShortcut(QKeySequence("Ctrl+6"), self, activated=lambda: self.tabs.setCurrentIndex(5))
+        QShortcut(QKeySequence("Ctrl+="), self, activated=self._zoom_in)
+        QShortcut(QKeySequence("Ctrl++"), self, activated=self._zoom_in)
+        QShortcut(QKeySequence("Ctrl+-"), self, activated=self._zoom_out)
+        QShortcut(QKeySequence("Ctrl+0"), self, activated=self._zoom_reset)
+        QShortcut(QKeySequence("Ctrl+A"), self, activated=self._select_all_cards)
+        QShortcut(QKeySequence("Escape"), self, activated=self._deselect_all_cards)
 
         # ── System Tray ─────────────────────────────────────────────────────
         self._setup_tray()
@@ -3567,11 +4372,11 @@ class MainWindow(QMainWindow):
             return
         # Build a simple colored icon
         pm = QPixmap(32, 32)
-        pm.fill(QColor('#89b4fa'))
+        pm.fill(QColor(C('accent')))
         p = QPainter(pm)
-        p.setPen(QColor('#1e1e2e'))
+        p.setPen(QColor('#ffffff'))
         p.setFont(QFont('Segoe UI', 16, QFont.Weight.Bold))
-        p.drawText(pm.rect(), Qt.AlignmentFlag.AlignCenter, 'A')
+        p.drawText(pm.rect(), Qt.AlignmentFlag.AlignCenter, 'V')
         p.end()
         icon = QIcon(pm)
         self.setWindowIcon(icon)
@@ -3609,7 +4414,7 @@ class MainWindow(QMainWindow):
                 self.isMinimized() and self._tray and self._tray.isVisible()):
             QTimer.singleShot(0, self.hide)
             self._tray.showMessage(
-                "Artlist Scraper", "Running in background. Double-click tray to restore.",
+                "Video Scraper", "Running in background. Double-click tray to restore.",
                 QSystemTrayIcon.MessageIcon.Information, 2000)
 
     # ── Toast Notifications ─────────────────────────────────────────────────
@@ -3647,6 +4452,94 @@ class MainWindow(QMainWindow):
         self.inp_search.setFocus()
         self.inp_search.selectAll()
 
+    # ── Zoom System ────────────────────────────────────────────────────────
+
+    def _on_zoom_changed(self, idx):
+        """Handle zoom combo selection."""
+        scale = self._zoom_combo.currentData()
+        if scale and abs(scale - _ui_scale) > 0.01:
+            self._apply_zoom(scale)
+
+    def _on_theme_changed(self, theme_name):
+        """Handle theme combo selection."""
+        if theme_name and theme_name in THEME_PALETTES:
+            _set_theme(theme_name)
+            cfg = load_config() or {}
+            cfg['theme'] = theme_name
+            save_config(cfg)
+            self._apply_zoom(_ui_scale)
+
+    def _zoom_in(self):
+        idx = self._zoom_combo.currentIndex()
+        if idx < self._zoom_combo.count() - 1:
+            self._zoom_combo.setCurrentIndex(idx + 1)
+
+    def _zoom_out(self):
+        idx = self._zoom_combo.currentIndex()
+        if idx > 0:
+            self._zoom_combo.setCurrentIndex(idx - 1)
+
+    def _zoom_reset(self):
+        for i in range(self._zoom_combo.count()):
+            if self._zoom_combo.itemData(i) == 1.0:
+                self._zoom_combo.setCurrentIndex(i)
+                break
+
+    def _apply_zoom(self, scale):
+        """Regenerate stylesheet, rebuild entire UI at new scale."""
+        global _ui_scale
+        _ui_scale = scale
+
+        # Update ClipCard size table
+        sf = scale * _dpi_factor
+        ClipCard.SIZES = [
+            (int(160 * sf), int(90 * sf)),
+            (int(200 * sf), int(112 * sf)),
+            (int(240 * sf), int(135 * sf)),
+            (int(320 * sf), int(180 * sf)),
+        ]
+
+        # Get current theme
+        cfg = load_config() or {}
+        theme_name = cfg.get('theme', 'OLED')
+
+        # Apply themed + scaled stylesheet
+        QApplication.instance().setStyleSheet(_build_stylesheet(scale, theme_name))
+
+        # Full UI rebuild to re-evaluate all Z() and C() calls
+        current_tab = self.tabs.currentIndex() if hasattr(self, 'tabs') else 0
+        old_central = self.centralWidget()
+        self._build_ui()
+        if old_central:
+            old_central.deleteLater()
+        self.tabs.setCurrentIndex(current_tab)
+
+        # Restore state after rebuild
+        self._load_saved_config()
+        self._do_search()
+        self._update_stats()
+        self._refresh_filter_dropdowns()
+        self._refresh_collections_combo()
+        self._refresh_saved_searches()
+
+        # Re-sync zoom combo (rebuild created a new one)
+        for i in range(self._zoom_combo.count()):
+            if abs(self._zoom_combo.itemData(i) - scale) < 0.01:
+                self._zoom_combo.blockSignals(True)
+                self._zoom_combo.setCurrentIndex(i)
+                self._zoom_combo.blockSignals(False)
+                break
+
+        # Re-sync theme combo
+        if hasattr(self, '_theme_combo'):
+            idx_t = self._theme_combo.findText(theme_name)
+            if idx_t >= 0:
+                self._theme_combo.blockSignals(True)
+                self._theme_combo.setCurrentIndex(idx_t)
+                self._theme_combo.blockSignals(False)
+
+        self._toast(f"Zoom: {int(scale * 100)}%", 'info', 1500)
+
     # ── Header ──────────────────────────────────────────────────────────────
 
     def _build_ui(self):
@@ -3673,27 +4566,78 @@ class MainWindow(QMainWindow):
 
     def _build_header(self):
         hdr = QFrame()
-        hdr.setFixedHeight(52)
-        hdr.setStyleSheet("background:#181825; border-bottom:1px solid #313244;")
+        hdr.setObjectName('app-header')
+        hdr.setFixedHeight(Z(48))
+        hdr.setStyleSheet(f"background:{C('bg_deep')}; border-bottom:1px solid {C('border_subtle')};")
         lay = QHBoxLayout(hdr)
-        lay.setContentsMargins(20,0,20,0)
+        lay.setContentsMargins(Z(20),0,Z(20),0)
 
-        t = QLabel("🎬  Artlist M3U8 Scraper")
-        t.setStyleSheet("font-size:15px; font-weight:700; color:#89b4fa; background:transparent;")
+        t = QLabel("VIDEO SCRAPER")
+        t.setStyleSheet(f"font-size:{Z(13)}px; font-weight:700; color:{C('text')}; background:transparent; letter-spacing:3px;")
         lay.addWidget(t)
         lay.addStretch()
 
-        self.lbl_clips_hdr  = self._hdr_lbl("Clips: 0",  "#cdd6f4")
-        self.lbl_m3u8_hdr   = self._hdr_lbl("M3U8: 0",   "#a6e3a1")
-        self.lbl_status_hdr = self._hdr_lbl("● Idle",    "#6c7086")
+        self.lbl_clips_hdr  = self._hdr_lbl("Clips: 0",  "{C('text')}")
+        self.lbl_m3u8_hdr   = self._hdr_lbl("M3U8: 0",   "{C('success')}")
+        self.lbl_status_hdr = self._hdr_lbl("● Idle",    "{C('text_muted')}")
 
         for lbl in (self.lbl_clips_hdr, self.lbl_m3u8_hdr, self.lbl_status_hdr):
-            lay.addSpacing(22); lay.addWidget(lbl)
+            lay.addSpacing(Z(22)); lay.addWidget(lbl)
+
+        # ── Zoom controls ──────────────────────────────────────────────────
+        lay.addSpacing(Z(16))
+        sep = QFrame(); sep.setFrameShape(QFrame.Shape.VLine)
+        sep.setStyleSheet(f"color:{C('border')};"); sep.setFixedHeight(Z(24))
+        lay.addWidget(sep); lay.addSpacing(Z(8))
+
+        zoom_lbl = QLabel("Zoom:")
+        zoom_lbl.setStyleSheet(f"color:{C('text_muted')}; font-size:{Z(11)}px; font-weight:600; background:transparent;")
+        lay.addWidget(zoom_lbl); lay.addSpacing(Z(4))
+
+        self._zoom_combo = QComboBox()
+        self._zoom_combo.setFixedWidth(Z(80))
+        self._zoom_combo.setStyleSheet(
+            f"QComboBox {{ background:{C('accent_combo')}; color:{C('text')}; border:1px solid {C('border_input')}; "
+            f"border-radius:{Z(4)}px; padding:{Z(2)}px {Z(6)}px; font-size:{Z(11)}px; font-weight:600; }}"
+            f"QComboBox QAbstractItemView {{ font-size:{Z(11)}px; }}")
+        for label, val in ZOOM_PRESETS:
+            self._zoom_combo.addItem(label, val)
+        # Set to current zoom level
+        for idx in range(self._zoom_combo.count()):
+            if abs(self._zoom_combo.itemData(idx) - _ui_scale) < 0.01:
+                self._zoom_combo.setCurrentIndex(idx)
+                break
+        self._zoom_combo.currentIndexChanged.connect(self._on_zoom_changed)
+        lay.addWidget(self._zoom_combo)
+
+        # ── Theme selector ──────────────────────────────────────────────────
+        lay.addSpacing(Z(8))
+        theme_lbl = QLabel("Theme:")
+        theme_lbl.setStyleSheet(f"color:{C('text_muted')}; font-size:{Z(11)}px; font-weight:600; background:transparent;")
+        lay.addWidget(theme_lbl); lay.addSpacing(Z(4))
+
+        self._theme_combo = QComboBox()
+        self._theme_combo.setFixedWidth(Z(100))
+        self._theme_combo.setStyleSheet(
+            f"QComboBox {{ background:{C('accent_combo')}; color:{C('text')}; border:1px solid {C('border_input')}; "
+            f"border-radius:{Z(4)}px; padding:{Z(2)}px {Z(6)}px; font-size:{Z(11)}px; font-weight:600; }}"
+            f"QComboBox QAbstractItemView {{ font-size:{Z(11)}px; }}")
+        for name in THEME_NAMES:
+            self._theme_combo.addItem(name)
+        # Restore saved theme
+        cfg = load_config()
+        saved_theme = cfg.get('theme', 'OLED')
+        idx_t = self._theme_combo.findText(saved_theme)
+        if idx_t >= 0:
+            self._theme_combo.setCurrentIndex(idx_t)
+        self._theme_combo.currentTextChanged.connect(self._on_theme_changed)
+        lay.addWidget(self._theme_combo)
+
         return hdr
 
     def _hdr_lbl(self, text, color):
         l = QLabel(text)
-        l.setStyleSheet(f"font-size:12px; font-weight:600; background:transparent; color:{color};")
+        l.setStyleSheet(f"font-size:{Z(12)}px; font-weight:600; background:transparent; color:{color};")
         return l
 
     # ── Config Tab ──────────────────────────────────────────────────────────
@@ -3702,7 +4646,7 @@ class MainWindow(QMainWindow):
         scroll = QScrollArea(); scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         inner = QWidget(); scroll.setWidget(inner)
-        lay = QVBoxLayout(inner); lay.setContentsMargins(24,20,24,24); lay.setSpacing(14)
+        lay = QVBoxLayout(inner); lay.setContentsMargins(Z(24),Z(20),Z(24),Z(24)); lay.setSpacing(Z(14))
 
         # Site Profiles — multi-select for round-robin rotation
         grp_profile = QGroupBox("Site Profiles  (round-robin rotation)"); gp = QVBoxLayout(grp_profile)
@@ -3711,13 +4655,13 @@ class MainWindow(QMainWindow):
             prof = SiteProfile.get(name)
             chk = QCheckBox(f"{name}  --  {prof.description[:55]}")
             chk.setChecked(name in ('Artlist', 'Pexels'))
-            chk.setStyleSheet("color:#cdd6f4; font-size:12px;")
+            chk.setStyleSheet(f"color:{C('text_soft')}; font-size:{Z(12)}px;")
             gp.addWidget(chk)
             self._profile_checks[name] = chk
         brow = QHBoxLayout()
         brow.addWidget(QLabel("Batch size per site:"))
-        self.spin_batch_size = QSpinBox(); self.spin_batch_size.setRange(5, 500)
-        self.spin_batch_size.setValue(50); self.spin_batch_size.setSuffix(" pages")
+        self.spin_batch_size = QSpinBox(); self.spin_batch_size.setRange(5, 5000)
+        self.spin_batch_size.setValue(100); self.spin_batch_size.setSuffix(" pages")
         self.spin_batch_size.setToolTip("Pages to crawl per site before rotating to the next")
         brow.addWidget(self.spin_batch_size); brow.addStretch()
         gp.addLayout(brow)
@@ -3731,29 +4675,29 @@ class MainWindow(QMainWindow):
         grp = QGroupBox("Target"); g = QVBoxLayout(grp)
         r = QHBoxLayout(); r.addWidget(QLabel("Start URL:"))
         self.inp_url = QLineEdit("https://artlist.io/stock-footage/")
-        self.inp_url.setMinimumWidth(200); r.addWidget(self.inp_url, 1); g.addLayout(r)
+        self.inp_url.setMinimumWidth(Z(200)); r.addWidget(self.inp_url, 1); g.addLayout(r)
         g.addWidget(self._sub("Crawler follows all video links from this page automatically."))
         lay.addWidget(grp)
 
         # Rate limits
         grp2 = QGroupBox("Rate Limiting  (Server Safety)"); g2 = QVBoxLayout(grp2)
         def spinrow(lbl, attr, mn, mx, val, sfx, tip):
-            r2 = QHBoxLayout(); l = QLabel(lbl); l.setFixedWidth(140); r2.addWidget(l)
+            r2 = QHBoxLayout(); l = QLabel(lbl); l.setFixedWidth(Z(140)); r2.addWidget(l)
             sp = QSpinBox(); sp.setRange(mn,mx); sp.setValue(val)
-            sp.setSuffix(sfx); sp.setFixedWidth(130); setattr(self, attr, sp)
-            r2.addWidget(sp); r2.addSpacing(10)
+            sp.setSuffix(sfx); sp.setFixedWidth(Z(130)); setattr(self, attr, sp)
+            r2.addWidget(sp); r2.addSpacing(Z(10))
             t2 = QLabel(tip); t2.setObjectName("subtext"); r2.addWidget(t2,1); return r2
-        g2.addLayout(spinrow("Page delay:",   'spin_page_delay',   500,30000,2500," ms","Wait between page loads."))
-        g2.addLayout(spinrow("Scroll delay:", 'spin_scroll_delay', 100, 5000, 800, " ms","Wait between scroll steps."))
-        g2.addLayout(spinrow("M3U8 wait:",    'spin_m3u8_wait',   1000,15000,4000," ms","Dwell after load for player to fire M3U8 requests."))
-        g2.addLayout(spinrow("Scroll steps:", 'spin_scroll_steps',   3,   50,  15,   "","Scroll passes on catalog pages."))
+        g2.addLayout(spinrow("Page delay:",   'spin_page_delay',   200,30000,2000," ms","Wait between page loads."))
+        g2.addLayout(spinrow("Scroll delay:", 'spin_scroll_delay', 50, 5000, 500, " ms","Wait between scroll steps."))
+        g2.addLayout(spinrow("M3U8 wait:",    'spin_m3u8_wait',   500,15000,3000," ms","Dwell after load for player to fire M3U8 requests."))
+        g2.addLayout(spinrow("Scroll steps:", 'spin_scroll_steps',   3,  200,  20,   "","Scroll passes on catalog pages."))
         g2.addLayout(spinrow("Page timeout:", 'spin_timeout',     5000,120000,30000," ms","Max load wait before skip."))
         lay.addWidget(grp2)
 
         # Limits
         grp3 = QGroupBox("Crawl Limits  (0 = unlimited)"); g3 = QVBoxLayout(grp3)
-        g3.addLayout(spinrow("Max pages:", 'spin_max_pages', 0,99999,0,"","Stop after N pages."))
-        g3.addLayout(spinrow("Max depth:", 'spin_max_depth', 1,   10,2,"","Depth from start URL."))
+        g3.addLayout(spinrow("Max pages:", 'spin_max_pages', 0,99999,0,"","Stop after N pages (0=unlimited)."))
+        g3.addLayout(spinrow("Max depth:", 'spin_max_depth', 1,   25,3,"","Depth from start URL."))
         lay.addWidget(grp3)
 
         # Options
@@ -3761,20 +4705,20 @@ class MainWindow(QMainWindow):
         self.chk_headless = QCheckBox("Headless mode"); self.chk_headless.setChecked(True)
         self.chk_headless.setToolTip("Uncheck to see the browser — required for solving CAPTCHAs/challenges")
         self.chk_resume   = QCheckBox("Resume mode  (skip already-crawled pages)"); self.chk_resume.setChecked(True)
-        g4.addWidget(self.chk_headless); g4.addSpacing(30); g4.addWidget(self.chk_resume); g4.addStretch()
+        g4.addWidget(self.chk_headless); g4.addSpacing(Z(30)); g4.addWidget(self.chk_resume); g4.addStretch()
         lay.addWidget(grp4)
 
         # Output dir
         grp5 = QGroupBox("Output Directory"); g5 = QHBoxLayout(grp5)
         self.inp_output = QLineEdit(os.path.join(os.path.expanduser('~'), 'ArtlistScraper', 'output'))
         g5.addWidget(self.inp_output,1)
-        bb = QPushButton("Browse..."); bb.setObjectName("neutral"); bb.setFixedWidth(90)
+        bb = QPushButton("Browse..."); bb.setObjectName("neutral"); bb.setFixedWidth(Z(90))
         bb.clicked.connect(self._browse_output); g5.addWidget(bb)
         lay.addWidget(grp5)
 
         btns = QHBoxLayout()
-        sb = QPushButton("💾  Save Config"); sb.clicked.connect(self._save_cfg); sb.setFixedHeight(36)
-        lb = QPushButton("📂  Load Config"); lb.setObjectName("neutral"); lb.clicked.connect(self._load_cfg_file); lb.setFixedHeight(36)
+        sb = QPushButton("💾  Save Config"); sb.clicked.connect(self._save_cfg); sb.setFixedHeight(Z(36))
+        lb = QPushButton("📂  Load Config"); lb.setObjectName("neutral"); lb.clicked.connect(self._load_cfg_file); lb.setFixedHeight(Z(36))
         btns.addWidget(sb); btns.addWidget(lb); btns.addStretch()
         lay.addLayout(btns); lay.addStretch()
         return scroll
@@ -3783,72 +4727,72 @@ class MainWindow(QMainWindow):
 
     def _build_crawl_tab(self):
         w = QWidget(); lay = QVBoxLayout(w)
-        lay.setContentsMargins(20,16,20,16); lay.setSpacing(12)
+        lay.setContentsMargins(Z(20),Z(16),Z(20),Z(16)); lay.setSpacing(Z(12))
 
         # Stat cards
         cards = QHBoxLayout()
         for attr, label, color in [
-            ('stat_clips',  'Clips Found',  '#89b4fa'),
-            ('stat_m3u8',   'With M3U8',    '#a6e3a1'),
-            ('stat_pages',  'Pages Done',   '#cba6f7'),
-            ('stat_queued', 'In Queue',     '#f9e2af'),
-            ('stat_errors', 'Errors',       '#f38ba8'),
+            ('stat_clips',  'Clips Found',  C('accent')),
+            ('stat_m3u8',   'With M3U8',    C('success')),
+            ('stat_pages',  'Pages Done',   C('purple')),
+            ('stat_queued', 'In Queue',     C('warning')),
+            ('stat_errors', 'Errors',       C('error')),
         ]:
-            card = QFrame(); card.setObjectName('stat-card'); card.setFixedHeight(76)
-            cl = QVBoxLayout(card); cl.setContentsMargins(14,8,14,8); cl.setSpacing(2)
+            card = QFrame(); card.setObjectName('stat-card'); card.setFixedHeight(Z(76))
+            cl = QVBoxLayout(card); cl.setContentsMargins(Z(14),Z(8),Z(14),Z(8)); cl.setSpacing(Z(2))
             lv = QLabel("0")
-            lv.setStyleSheet(f"font-size:24px; font-weight:700; color:{color}; background:transparent;")
+            lv.setStyleSheet(f"font-size:{Z(24)}px; font-weight:700; color:{color}; background:transparent;")
             lv.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            ll = QLabel(label); ll.setStyleSheet("color:#6c7086; font-size:11px; background:transparent;")
+            ll = QLabel(label); ll.setStyleSheet(f"color:{C('text_muted')}; font-size:{Z(11)}px; background:transparent;")
             ll.setAlignment(Qt.AlignmentFlag.AlignCenter)
             cl.addWidget(lv); cl.addWidget(ll); setattr(self, attr, lv); cards.addWidget(card)
         lay.addLayout(cards)
 
         self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0,0); self.progress_bar.setFixedHeight(5)
+        self.progress_bar.setRange(0,0); self.progress_bar.setFixedHeight(Z(5))
         self.progress_bar.setVisible(False); lay.addWidget(self.progress_bar)
 
         # ── Browser status banner ──────────────────────────────────────────
         self.browser_banner = QFrame()
         self.browser_banner.setStyleSheet(
-            "background:#2a1a1a; border:1px solid #f38ba8; border-radius:6px; padding:6px;")
+            f"background:{C('toast_error_bg')}; border:1px solid {C('error')}40; border-radius:{Z(6)}px; padding:{Z(8)}px;")
         bb_lay = QHBoxLayout(self.browser_banner)
-        bb_lay.setContentsMargins(12,6,12,6)
+        bb_lay.setContentsMargins(Z(12),Z(6),Z(12),Z(6))
         self.lbl_browser_status = QLabel("⚠  Chromium browser not found — click Install to set it up.")
-        self.lbl_browser_status.setStyleSheet("color:#f38ba8; font-weight:600;")
+        self.lbl_browser_status.setStyleSheet(f"color:{C('error')}; font-weight:500;")
         bb_lay.addWidget(self.lbl_browser_status, 1)
         self.btn_install_browser = QPushButton("Install Browser")
         self.btn_install_browser.setObjectName("danger")
-        self.btn_install_browser.setFixedHeight(30); self.btn_install_browser.setFixedWidth(140)
+        self.btn_install_browser.setFixedHeight(Z(30)); self.btn_install_browser.setFixedWidth(Z(140))
         self.btn_install_browser.clicked.connect(self._install_browser)
         bb_lay.addWidget(self.btn_install_browser)
         lay.addWidget(self.browser_banner)
         btns = QHBoxLayout()
         self.btn_start = QPushButton("▶  Start Crawl")
-        self.btn_start.setObjectName("success"); self.btn_start.setFixedHeight(40)
+        self.btn_start.setObjectName("success"); self.btn_start.setFixedHeight(Z(40))
         self.btn_start.clicked.connect(self._start_crawl)
 
         self.btn_pause = QPushButton("⏸  Pause")
-        self.btn_pause.setObjectName("warning"); self.btn_pause.setFixedHeight(40)
+        self.btn_pause.setObjectName("warning"); self.btn_pause.setFixedHeight(Z(40))
         self.btn_pause.setEnabled(False); self.btn_pause.clicked.connect(self._toggle_pause)
 
         self.btn_stop = QPushButton("⏹  Stop")
-        self.btn_stop.setObjectName("danger"); self.btn_stop.setFixedHeight(40)
+        self.btn_stop.setObjectName("danger"); self.btn_stop.setFixedHeight(Z(40))
         self.btn_stop.setEnabled(False); self.btn_stop.clicked.connect(self._stop_crawl)
 
-        clrdb  = QPushButton("🗑  Clear DB");   clrdb.setObjectName("neutral");  clrdb.setFixedHeight(40);  clrdb.clicked.connect(self._clear_db)
-        rebuild_fts = QPushButton("🔄  Rebuild Index"); rebuild_fts.setObjectName("neutral"); rebuild_fts.setFixedHeight(40); rebuild_fts.setToolTip("Rebuild full-text search index if search results seem wrong"); rebuild_fts.clicked.connect(self._rebuild_fts)
-        clrlog = QPushButton("Clear Log"); clrlog.setObjectName("neutral"); clrlog.setFixedHeight(40); clrlog.clicked.connect(lambda: self.log_view.clear())
+        clrdb  = QPushButton("🗑  Clear DB");   clrdb.setObjectName("neutral");  clrdb.setFixedHeight(Z(40));  clrdb.clicked.connect(self._clear_db)
+        rebuild_fts = QPushButton("🔄  Rebuild Index"); rebuild_fts.setObjectName("neutral"); rebuild_fts.setFixedHeight(Z(40)); rebuild_fts.setToolTip("Rebuild full-text search index if search results seem wrong"); rebuild_fts.clicked.connect(self._rebuild_fts)
+        clrlog = QPushButton("Clear Log"); clrlog.setObjectName("neutral"); clrlog.setFixedHeight(Z(40)); clrlog.clicked.connect(lambda: self.log_view.clear())
         self.chk_verbose_log = QCheckBox("Verbose")
         self.chk_verbose_log.setChecked(True)
         self.chk_verbose_log.setToolTip("Show DEBUG-level log messages (detailed troubleshooting output)")
-        self.chk_verbose_log.setStyleSheet("color:#6c7086; font-size:11px;")
+        self.chk_verbose_log.setStyleSheet(f"color:{C('text_muted')}; font-size:{Z(11)}px;")
 
         for b in (self.btn_start, self.btn_pause, self.btn_stop): btns.addWidget(b)
         btns.addStretch(); btns.addWidget(self.chk_verbose_log); btns.addWidget(rebuild_fts); btns.addWidget(clrdb); btns.addWidget(clrlog)
         lay.addLayout(btns)
 
-        log_lbl = QLabel("Live Log"); log_lbl.setStyleSheet("color:#6c7086; font-size:11px; font-weight:600;")
+        log_lbl = QLabel("Live Log"); log_lbl.setStyleSheet(f"color:{C('text_muted')}; font-size:{Z(11)}px; font-weight:600;")
         lay.addWidget(log_lbl)
         self.log_view = QTextEdit(); self.log_view.setReadOnly(True)
         self.log_view.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
@@ -3859,24 +4803,44 @@ class MainWindow(QMainWindow):
 
     def _build_search_tab(self):
         w = QWidget(); lay = QVBoxLayout(w)
-        lay.setContentsMargins(20,16,20,12); lay.setSpacing(8)
+        lay.setContentsMargins(Z(20),Z(16),Z(20),Z(12)); lay.setSpacing(Z(8))
 
         # ── Search bar + view controls ────────────────────────────────────
-        srow = QHBoxLayout(); srow.setSpacing(6)
+        srow = QHBoxLayout(); srow.setSpacing(Z(6))
         self.inp_search = QLineEdit()
         self.inp_search.setPlaceholderText(
             "Search by title, tags, creator, collection, camera, resolution...")
-        self.inp_search.setMinimumHeight(38)
+        self.inp_search.setMinimumHeight(Z(38))
         self.inp_search.returnPressed.connect(lambda: (self._search_timer.stop(), self._do_search()))
         self.inp_search.textChanged.connect(lambda: self._search_timer.start(350))
         srow.addWidget(self.inp_search, 1)
 
-        sb = QPushButton("Search"); sb.setFixedHeight(38); sb.setFixedWidth(80)
+        sb = QPushButton("Search"); sb.setFixedHeight(Z(38)); sb.setFixedWidth(Z(80))
         sb.clicked.connect(self._do_search); srow.addWidget(sb)
+
+        # Catalog mode toggle
+        self.btn_catalog = QPushButton("Catalog"); self.btn_catalog.setFixedHeight(Z(38))
+        self.btn_catalog.setFixedWidth(Z(80)); self.btn_catalog.setCheckable(True)
+        self.btn_catalog.setObjectName("neutral")
+        self.btn_catalog.setToolTip("Catalog mode — full-width grid, all clips, sortable")
+        self.btn_catalog.clicked.connect(self._toggle_catalog_mode)
+        srow.addWidget(self.btn_catalog)
+
+        # Sort dropdown (prominent in catalog mode, always functional)
+        self.combo_sort = QComboBox(); self.combo_sort.setFixedHeight(Z(38))
+        self.combo_sort.setMinimumWidth(Z(130))
+        for label, key in [('Newest First','newest'),('Oldest First','oldest'),
+                           ('Title A-Z','title_az'),('Title Z-A','title_za'),
+                           ('Resolution','resolution'),('Shortest','duration_short'),
+                           ('Longest','duration_long'),('Rating','rating')]:
+            self.combo_sort.addItem(label, key)
+        self.combo_sort.currentIndexChanged.connect(self._do_search)
+        srow.addWidget(self.combo_sort)
         lay.addLayout(srow)
 
-        # ── Filter row 1: column filters ──────────────────────────────────
-        frow = QHBoxLayout(); frow.setSpacing(4); frow.setContentsMargins(0,0,0,0)
+        # ── Filter row 1: column filters (wrapped for catalog hide/show) ──
+        self._filter_row1 = QWidget()
+        frow = QHBoxLayout(self._filter_row1); frow.setSpacing(Z(4)); frow.setContentsMargins(0,0,0,0)
         filter_defs = [
             ('combo_source',     'Source',     'source_site'),
             ('combo_creator',    'Creator',    'creator'),
@@ -3887,9 +4851,9 @@ class MainWindow(QMainWindow):
         self._filter_map = {}
         for attr, label, col in filter_defs:
             lbl = QLabel(label+":")
-            lbl.setStyleSheet("color:#6c7086; font-size:11px;")
+            lbl.setStyleSheet(f"color:{C('text_muted')}; font-size:{Z(11)}px;")
             frow.addWidget(lbl)
-            cb = QComboBox(); cb.setMinimumWidth(70); cb.setMaximumWidth(180)
+            cb = QComboBox(); cb.setMinimumWidth(Z(70)); cb.setMaximumWidth(Z(180))
             cb.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
             cb.addItem("All"); setattr(self, attr, cb)
             self._filter_map[attr] = col
@@ -3897,102 +4861,102 @@ class MainWindow(QMainWindow):
             frow.addWidget(cb)
 
         rfbtn = QPushButton("↻"); rfbtn.setObjectName("neutral")
-        rfbtn.setFixedSize(28, 28); rfbtn.setToolTip("Refresh filters")
+        rfbtn.setFixedSize(Z(28), Z(28)); rfbtn.setToolTip("Refresh filters")
         rfbtn.clicked.connect(self._refresh_filter_dropdowns); frow.addWidget(rfbtn)
         frow.addStretch()
-        lay.addLayout(frow)
+        lay.addWidget(self._filter_row1)
 
         # ── Filter row 2: asset management — scrollable to prevent cutoff ─
-        frow2_scroll = QScrollArea()
+        self._filter_row2 = frow2_scroll = QScrollArea()
         frow2_scroll.setWidgetResizable(True)
         frow2_scroll.setFrameShape(QFrame.Shape.NoFrame)
         frow2_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         frow2_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        frow2_scroll.setFixedHeight(44)
+        frow2_scroll.setFixedHeight(Z(44))
         frow2_scroll.setStyleSheet("QScrollArea { background:transparent; border:none; }")
 
         frow2_w = QWidget(); frow2_w.setStyleSheet("background:transparent;")
-        frow2 = QHBoxLayout(frow2_w); frow2.setSpacing(6); frow2.setContentsMargins(0,2,0,2)
+        frow2 = QHBoxLayout(frow2_w); frow2.setSpacing(Z(6)); frow2.setContentsMargins(0,Z(2),0,Z(2))
 
         # Duration range
-        lbl_d = QLabel("Dur:"); lbl_d.setStyleSheet("color:#6c7086; font-size:11px;")
+        lbl_d = QLabel("Dur:"); lbl_d.setStyleSheet(f"color:{C('text_muted')}; font-size:{Z(11)}px;")
         frow2.addWidget(lbl_d)
-        self.combo_duration = QComboBox(); self.combo_duration.setMinimumWidth(65)
+        self.combo_duration = QComboBox(); self.combo_duration.setMinimumWidth(Z(65))
         for d in ['All', '0-10s', '10-30s', '30s-1m', '1-5m', '5m+']:
             self.combo_duration.addItem(d)
         self.combo_duration.currentTextChanged.connect(self._do_search)
         frow2.addWidget(self.combo_duration)
 
         # Collection filter
-        lbl_c = QLabel("Coll:"); lbl_c.setStyleSheet("color:#6c7086; font-size:11px;")
+        lbl_c = QLabel("Coll:"); lbl_c.setStyleSheet(f"color:{C('text_muted')}; font-size:{Z(11)}px;")
         frow2.addWidget(lbl_c)
-        self.combo_user_collection = QComboBox(); self.combo_user_collection.setMinimumWidth(90)
+        self.combo_user_collection = QComboBox(); self.combo_user_collection.setMinimumWidth(Z(90))
         self.combo_user_collection.addItem("All")
         self.combo_user_collection.currentTextChanged.connect(self._do_search)
         frow2.addWidget(self.combo_user_collection)
 
         # Vertical separator
         sep1 = QFrame(); sep1.setFrameShape(QFrame.Shape.VLine)
-        sep1.setStyleSheet("color:#313244;"); sep1.setFixedWidth(1)
+        sep1.setStyleSheet(f"color:{C('border')};"); sep1.setFixedWidth(Z(1))
         frow2.addWidget(sep1)
 
         # Favorites toggle
         self.chk_favorites = QCheckBox("\u2665 Fav")
-        self.chk_favorites.setStyleSheet("color:#f38ba8; font-size:11px; font-weight:600;")
+        self.chk_favorites.setStyleSheet(f"color:{C('error')}; font-size:{Z(11)}px; font-weight:500;")
         self.chk_favorites.toggled.connect(self._do_search)
         frow2.addWidget(self.chk_favorites)
 
         # Downloaded toggle
         self.chk_downloaded = QCheckBox("\u2713 DL'd")
-        self.chk_downloaded.setStyleSheet("color:#a6e3a1; font-size:11px; font-weight:600;")
+        self.chk_downloaded.setStyleSheet(f"color:{C('success')}; font-size:{Z(11)}px; font-weight:500;")
         self.chk_downloaded.toggled.connect(self._do_search)
         frow2.addWidget(self.chk_downloaded)
 
         # AND/OR toggle
         self.btn_search_mode = QPushButton("OR")
-        self.btn_search_mode.setObjectName("neutral"); self.btn_search_mode.setFixedSize(36, 26)
+        self.btn_search_mode.setObjectName("neutral"); self.btn_search_mode.setFixedSize(Z(36), Z(26))
         self.btn_search_mode.setCheckable(True); self.btn_search_mode.setToolTip("Toggle AND/OR search mode")
         self.btn_search_mode.clicked.connect(self._toggle_search_mode)
         frow2.addWidget(self.btn_search_mode)
 
         # Min rating filter
-        lbl_mr = QLabel("\u2605:"); lbl_mr.setStyleSheet("color:#f9e2af; font-size:11px;")
+        lbl_mr = QLabel("\u2605:"); lbl_mr.setStyleSheet(f"color:{C('warning')}; font-size:{Z(11)}px;")
         frow2.addWidget(lbl_mr)
         self.spin_min_rating = QSpinBox(); self.spin_min_rating.setRange(0, 5)
-        self.spin_min_rating.setValue(0); self.spin_min_rating.setFixedWidth(44)
+        self.spin_min_rating.setValue(0); self.spin_min_rating.setFixedWidth(Z(44))
         self.spin_min_rating.setToolTip("Minimum star rating")
         self.spin_min_rating.valueChanged.connect(self._do_search)
         frow2.addWidget(self.spin_min_rating)
 
         sep2 = QFrame(); sep2.setFrameShape(QFrame.Shape.VLine)
-        sep2.setStyleSheet("color:#313244;"); sep2.setFixedWidth(1)
+        sep2.setStyleSheet(f"color:{C('border')};"); sep2.setFixedWidth(Z(1))
         frow2.addWidget(sep2)
 
         # Saved searches
-        self.combo_saved_search = QComboBox(); self.combo_saved_search.setMinimumWidth(120)
+        self.combo_saved_search = QComboBox(); self.combo_saved_search.setMinimumWidth(Z(120))
         self.combo_saved_search.addItem("Saved Searches...")
         self.combo_saved_search.activated.connect(self._load_saved_search)
         frow2.addWidget(self.combo_saved_search)
 
         btn_save_search = QPushButton("Save"); btn_save_search.setObjectName("neutral")
-        btn_save_search.setFixedSize(44, 26); btn_save_search.setToolTip("Save current search as preset")
+        btn_save_search.setFixedSize(Z(44), Z(26)); btn_save_search.setToolTip("Save current search as preset")
         btn_save_search.clicked.connect(self._save_current_search)
         frow2.addWidget(btn_save_search)
 
         sep3 = QFrame(); sep3.setFrameShape(QFrame.Shape.VLine)
-        sep3.setStyleSheet("color:#313244;"); sep3.setFixedWidth(1)
+        sep3.setStyleSheet(f"color:{C('border')};"); sep3.setFixedWidth(Z(1))
         frow2.addWidget(sep3)
 
         # Card size slider (only visible in card mode)
         self.lbl_card_size = QLabel("Size:")
-        self.lbl_card_size.setStyleSheet("color:#6c7086; font-size:11px;")
+        self.lbl_card_size.setStyleSheet(f"color:{C('text_muted')}; font-size:{Z(11)}px;")
         self.card_size_slider = QSlider(Qt.Orientation.Horizontal)
-        self.card_size_slider.setRange(0, 2); self.card_size_slider.setValue(1)
-        self.card_size_slider.setFixedWidth(70)
+        self.card_size_slider.setRange(0, 3); self.card_size_slider.setValue(1)
+        self.card_size_slider.setFixedWidth(Z(70))
         self.card_size_slider.valueChanged.connect(self._on_card_size_changed)
         frow2.addWidget(self.lbl_card_size); frow2.addWidget(self.card_size_slider)
 
-        clrbtn = QPushButton("Clear"); clrbtn.setObjectName("neutral"); clrbtn.setFixedSize(48, 26)
+        clrbtn = QPushButton("Clear"); clrbtn.setObjectName("neutral"); clrbtn.setFixedSize(Z(48), Z(26))
         clrbtn.clicked.connect(self._clear_search); frow2.addWidget(clrbtn)
 
         frow2_scroll.setWidget(frow2_w)
@@ -4000,8 +4964,8 @@ class MainWindow(QMainWindow):
 
         # ── Main area: results splitter (left=cards, right=detail panel) ──
         self._search_splitter = QSplitter(Qt.Orientation.Horizontal)
-        self._search_splitter.setHandleWidth(4)
-        self._search_splitter.setStyleSheet("QSplitter::handle { background:#313244; }")
+        self._search_splitter.setHandleWidth(Z(4))
+        self._search_splitter.setStyleSheet(f"QSplitter::handle {{ background:{C('border_subtle')}; }}")
         lay.addWidget(self._search_splitter, 1)
 
         # ── Card grid (only view) ────────────────────────────────────────
@@ -4009,11 +4973,11 @@ class MainWindow(QMainWindow):
         self._card_scroll.setWidgetResizable(True)
         self._card_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._card_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._card_scroll.setStyleSheet("QScrollArea { background:#1e1e2e; }")
+        self._card_scroll.setStyleSheet(f"QScrollArea {{ background:{C('bg_card_area')}; }}")
         self._card_container = QWidget()
-        self._card_container.setStyleSheet("background:#1e1e2e;")
-        self._card_flow = FlowLayout(self._card_container, h_spacing=10, v_spacing=10)
-        self._card_flow.setContentsMargins(12, 12, 12, 12)
+        self._card_container.setStyleSheet(f"background:{C('bg_card_area')};")
+        self._card_flow = FlowLayout(self._card_container, h_spacing=Z(10), v_spacing=Z(10))
+        self._card_flow.setContentsMargins(Z(12),Z(12),Z(12),Z(12))
         self._card_container.setLayout(self._card_flow)
         self._card_scroll.setWidget(self._card_container)
         self._search_splitter.addWidget(self._card_scroll)
@@ -4025,15 +4989,23 @@ class MainWindow(QMainWindow):
         self._detail_panel = self._build_detail_panel()
         self._search_splitter.addWidget(self._detail_panel)
         self._detail_panel.setVisible(True)
-        self._search_splitter.setSizes([700, 360])
+        self._search_splitter.setSizes([Z(700), Z(360)])
         self._search_splitter.setCollapsible(1, False)
 
         # ── Bottom row ────────────────────────────────────────────────────
         brow = QHBoxLayout()
         self.lbl_result_count = QLabel("0 results"); self.lbl_result_count.setObjectName("subtext")
-        brow.addWidget(self.lbl_result_count); brow.addStretch()
+        brow.addWidget(self.lbl_result_count)
+        self.lbl_import_status = QLabel(""); self.lbl_import_status.setObjectName("subtext")
+        brow.addWidget(self.lbl_import_status)
+        brow.addStretch()
+        self.btn_import_folder = QPushButton("Import Folder")
+        self.btn_import_folder.setObjectName("warning"); self.btn_import_folder.setFixedHeight(Z(30))
+        self.btn_import_folder.setToolTip("Scan a local folder for video files and add them to the catalog")
+        self.btn_import_folder.clicked.connect(self._import_folder)
+        brow.addWidget(self.btn_import_folder)
         self.btn_fetch_thumbs = QPushButton("Fetch Thumbnails")
-        self.btn_fetch_thumbs.setObjectName("neutral"); self.btn_fetch_thumbs.setFixedHeight(30)
+        self.btn_fetch_thumbs.setObjectName("neutral"); self.btn_fetch_thumbs.setFixedHeight(Z(30))
         self.btn_fetch_thumbs.clicked.connect(self._start_thumb_worker)
         brow.addWidget(self.btn_fetch_thumbs)
         lay.addLayout(brow)
@@ -4041,6 +5013,43 @@ class MainWindow(QMainWindow):
 
     def _on_card_size_changed(self, val):
         self._populate_cards(self._last_rows if hasattr(self, '_last_rows') else [])
+
+    def _toggle_catalog_mode(self):
+        """Toggle catalog mode — maximize card grid for browsing all clips."""
+        on = self.btn_catalog.isChecked()
+        self._catalog_mode = on
+        # Hide/show filter rows
+        self._filter_row1.setVisible(not on)
+        self._filter_row2.setVisible(not on)
+        # Show/hide detail close button
+        self._detail_close_btn.setVisible(on)
+        # Collapse/restore detail panel
+        if on:
+            self._pre_catalog_sizes = self._search_splitter.sizes()
+            self._search_splitter.setSizes([self._search_splitter.width(), 0])
+            self._detail_panel.setVisible(False)
+            # Set card size to XL for catalog browsing
+            if hasattr(self, 'card_size_slider'):
+                self._pre_catalog_card_size = self.card_size_slider.value()
+                self.card_size_slider.setValue(3)
+            # Clear filters for full catalog view
+            self._clear_search()
+        else:
+            self._detail_panel.setVisible(True)
+            if hasattr(self, '_pre_catalog_sizes'):
+                self._search_splitter.setSizes(self._pre_catalog_sizes)
+            else:
+                self._search_splitter.setSizes([Z(700), Z(360)])
+            # Restore card size
+            if hasattr(self, '_pre_catalog_card_size') and hasattr(self, 'card_size_slider'):
+                self.card_size_slider.setValue(self._pre_catalog_card_size)
+            self._do_search()
+
+    def _catalog_close_detail(self):
+        """Hide detail panel in catalog mode."""
+        if getattr(self, '_catalog_mode', False):
+            self._detail_panel.setVisible(False)
+            self._search_splitter.setSizes([self._search_splitter.width(), 0])
 
     def _on_tag_clicked(self, tag):
         self.inp_search.setText(tag)
@@ -4052,20 +5061,27 @@ class MainWindow(QMainWindow):
     def _build_detail_panel(self):
         """Right-side detail panel — asset management hub with preview, rating, notes, tags, collections."""
         panel = QFrame()
-        panel.setStyleSheet("QFrame { background:#181825; border-left:1px solid #313244; }")
-        panel.setMinimumWidth(320); panel.setMaximumWidth(440)
+        panel.setStyleSheet(f"QFrame {{ background:{C('bg_panel')}; border-left:1px solid {C('border_subtle')}; }}")
+        panel.setMinimumWidth(Z(320)); panel.setMaximumWidth(Z(440))
         lay = QVBoxLayout(panel)
-        lay.setContentsMargins(14,12,14,12); lay.setSpacing(8)
+        lay.setContentsMargins(Z(14),Z(12),Z(14),Z(12)); lay.setSpacing(Z(8))
+
+        # Close button — visible in catalog mode to dismiss panel
+        self._detail_close_btn = QPushButton("Close Panel")
+        self._detail_close_btn.setObjectName("neutral"); self._detail_close_btn.setFixedHeight(Z(26))
+        self._detail_close_btn.setVisible(False)
+        self._detail_close_btn.clicked.connect(self._catalog_close_detail)
+        lay.addWidget(self._detail_close_btn)
 
         # ── Preview area (video player or thumbnail) ──────────────────────
         self._preview_stack = QStackedWidget()
-        self._preview_stack.setFixedHeight(200)
+        self._preview_stack.setFixedHeight(Z(200))
 
         # Page 0: static thumbnail
         self.detail_thumb = QLabel()
-        self.detail_thumb.setFixedHeight(200)
+        self.detail_thumb.setFixedHeight(Z(200))
         self.detail_thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.detail_thumb.setStyleSheet("background:#11111b; border-radius:6px; border:none;")
+        self.detail_thumb.setStyleSheet(f"background:{C('bg_video')}; border-radius:{Z(6)}px; border:none;")
         self._preview_stack.addWidget(self.detail_thumb)  # index 0
 
         # Page 1: video player (if available)
@@ -4074,8 +5090,8 @@ class MainWindow(QMainWindow):
         self._audio_output = None
         if _HAS_VIDEO:
             self._video_widget = QVideoWidget()
-            self._video_widget.setFixedHeight(200)
-            self._video_widget.setStyleSheet("background:#11111b; border-radius:6px;")
+            self._video_widget.setFixedHeight(Z(200))
+            self._video_widget.setStyleSheet(f"background:{C('bg_video')}; border-radius:{Z(6)}px;")
             self._audio_output = QAudioOutput()
             self._audio_output.setVolume(0.5)
             self._video_player = QMediaPlayer()
@@ -4086,23 +5102,23 @@ class MainWindow(QMainWindow):
 
         # ── Video controls (play/pause/stop + scrub) ──────────────────────
         if _HAS_VIDEO:
-            vctrl = QHBoxLayout(); vctrl.setSpacing(4)
+            vctrl = QHBoxLayout(); vctrl.setSpacing(Z(4))
             self.btn_preview_play = QPushButton("Play")
-            self.btn_preview_play.setObjectName("success"); self.btn_preview_play.setFixedHeight(28)
-            self.btn_preview_play.setFixedWidth(60)
+            self.btn_preview_play.setObjectName("success"); self.btn_preview_play.setFixedHeight(Z(28))
+            self.btn_preview_play.setFixedWidth(Z(60))
             self.btn_preview_play.clicked.connect(self._preview_toggle_play)
             vctrl.addWidget(self.btn_preview_play)
             self.btn_preview_stop = QPushButton("Stop")
-            self.btn_preview_stop.setObjectName("neutral"); self.btn_preview_stop.setFixedHeight(28)
-            self.btn_preview_stop.setFixedWidth(50)
+            self.btn_preview_stop.setObjectName("neutral"); self.btn_preview_stop.setFixedHeight(Z(28))
+            self.btn_preview_stop.setFixedWidth(Z(50))
             self.btn_preview_stop.clicked.connect(self._preview_stop)
             vctrl.addWidget(self.btn_preview_stop)
             self.preview_scrub = QSlider(Qt.Orientation.Horizontal)
-            self.preview_scrub.setRange(0, 1000); self.preview_scrub.setFixedHeight(20)
+            self.preview_scrub.setRange(0, 1000); self.preview_scrub.setFixedHeight(Z(20))
             self.preview_scrub.sliderMoved.connect(self._preview_seek)
             vctrl.addWidget(self.preview_scrub, 1)
             self.lbl_preview_time = QLabel("0:00")
-            self.lbl_preview_time.setStyleSheet("color:#6c7086; font-size:10px; font-family:Consolas;")
+            self.lbl_preview_time.setStyleSheet(f"color:{C('text_muted')}; font-size:{Z(10)}px; font-family:'Cascadia Code','JetBrains Mono',Consolas,monospace;")
             vctrl.addWidget(self.lbl_preview_time)
             lay.addLayout(vctrl)
             # Timer for scrub updates
@@ -4111,23 +5127,23 @@ class MainWindow(QMainWindow):
             self._preview_timer.start(250)
 
         # ── Title + favorite ──────────────────────────────────────────────
-        title_row = QHBoxLayout(); title_row.setSpacing(6)
+        title_row = QHBoxLayout(); title_row.setSpacing(Z(6))
         self.detail_title = QLabel("Select a clip")
         self.detail_title.setWordWrap(True)
-        self.detail_title.setStyleSheet("color:#cdd6f4; font-size:13px; font-weight:700;")
+        self.detail_title.setStyleSheet(f"color:{C('text')}; font-size:{Z(13)}px; font-weight:700;")
         title_row.addWidget(self.detail_title, 1)
         self.btn_detail_fav = QPushButton("\u2661")
-        self.btn_detail_fav.setFixedSize(32, 32)
+        self.btn_detail_fav.setFixedSize(Z(32), Z(32))
         self.btn_detail_fav.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_detail_fav.setStyleSheet(
-            "font-size:18px; background:transparent; border:none; color:#45475a;")
+            f"font-size:{Z(18)}px; background:transparent; border:none; color:{C('text_disabled')};")
         self.btn_detail_fav.setToolTip("Toggle favorite")
         self.btn_detail_fav.clicked.connect(self._detail_toggle_fav)
         title_row.addWidget(self.btn_detail_fav)
         lay.addLayout(title_row)
 
         # ── Star rating ───────────────────────────────────────────────────
-        self.detail_stars = StarRating(0, size=18, interactive=True)
+        self.detail_stars = StarRating(0, size=Z(18), interactive=True)
         self.detail_stars.rating_changed.connect(self._detail_set_rating)
         lay.addWidget(self.detail_stars)
 
@@ -4137,19 +5153,19 @@ class MainWindow(QMainWindow):
         meta_scroll.setStyleSheet("QScrollArea { background:transparent; }")
         meta_inner = QWidget(); meta_inner.setStyleSheet("background:transparent;")
         self._detail_meta_lay = QVBoxLayout(meta_inner)
-        self._detail_meta_lay.setContentsMargins(0,0,0,0); self._detail_meta_lay.setSpacing(4)
+        self._detail_meta_lay.setContentsMargins(0,0,0,0); self._detail_meta_lay.setSpacing(Z(4))
         meta_scroll.setWidget(meta_inner)
         lay.addWidget(meta_scroll, 1)
 
         # ── User notes ────────────────────────────────────────────────────
-        notes_lbl = QLabel("Notes"); notes_lbl.setStyleSheet("color:#6c7086; font-size:10px; font-weight:600;")
+        notes_lbl = QLabel("Notes"); notes_lbl.setStyleSheet(f"color:{C('text_muted')}; font-size:{Z(10)}px; font-weight:600;")
         lay.addWidget(notes_lbl)
         self.detail_notes = QTextEdit()
-        self.detail_notes.setMaximumHeight(60)
+        self.detail_notes.setMaximumHeight(Z(60))
         self.detail_notes.setPlaceholderText("Add notes about this clip...")
         self.detail_notes.setStyleSheet(
-            "background:#11111b; color:#cdd6f4; border:1px solid #313244; "
-            "border-radius:4px; font-size:11px; padding:4px;")
+            "background:{C('bg_video')}; color:{C('text_soft')}; border:1px solid {C('bg_button')}; "
+            f"border-radius:{Z(4)}px; font-size:{Z(11)}px; padding:{Z(6)}px;")
         self._notes_save_timer = QTimer(); self._notes_save_timer.setSingleShot(True)
         self._notes_save_timer.timeout.connect(self._detail_save_notes)
         self.detail_notes.textChanged.connect(lambda: self._notes_save_timer.start(800))
@@ -4157,59 +5173,59 @@ class MainWindow(QMainWindow):
 
         # ── User tags ─────────────────────────────────────────────────────
         tags_lbl = QLabel("My Tags (comma-separated)")
-        tags_lbl.setStyleSheet("color:#6c7086; font-size:10px; font-weight:600;")
+        tags_lbl.setStyleSheet(f"color:{C('text_muted')}; font-size:{Z(10)}px; font-weight:600;")
         lay.addWidget(tags_lbl)
         self.detail_user_tags = QLineEdit()
         self.detail_user_tags.setPlaceholderText("e.g. hero-shot, b-roll, client-xyz")
-        self.detail_user_tags.setFixedHeight(28)
+        self.detail_user_tags.setFixedHeight(Z(28))
         self.detail_user_tags.setStyleSheet(
-            "background:#11111b; color:#89b4fa; border:1px solid #313244; "
-            "border-radius:4px; font-size:11px; padding:2px 6px;")
+            "background:{C('bg_video')}; color:{C('accent_hover')}; border:1px solid {C('bg_button')}; "
+            f"border-radius:{Z(4)}px; font-size:{Z(11)}px; padding:{Z(4)}px {Z(8)}px;")
         self._tags_save_timer = QTimer(); self._tags_save_timer.setSingleShot(True)
         self._tags_save_timer.timeout.connect(self._detail_save_user_tags)
         self.detail_user_tags.textChanged.connect(lambda: self._tags_save_timer.start(800))
         lay.addWidget(self.detail_user_tags)
 
         # ── Collection management ─────────────────────────────────────────
-        coll_row = QHBoxLayout(); coll_row.setSpacing(4)
-        coll_lbl = QLabel("Collections:"); coll_lbl.setStyleSheet("color:#6c7086; font-size:10px; font-weight:600;")
+        coll_row = QHBoxLayout(); coll_row.setSpacing(Z(4))
+        coll_lbl = QLabel("Collections:"); coll_lbl.setStyleSheet(f"color:{C('text_muted')}; font-size:{Z(10)}px; font-weight:600;")
         coll_row.addWidget(coll_lbl)
-        self.detail_coll_combo = QComboBox(); self.detail_coll_combo.setFixedHeight(26)
-        self.detail_coll_combo.setMinimumWidth(100)
+        self.detail_coll_combo = QComboBox(); self.detail_coll_combo.setFixedHeight(Z(26))
+        self.detail_coll_combo.setMinimumWidth(Z(100))
         self.detail_coll_combo.addItem("Add to collection...")
         coll_row.addWidget(self.detail_coll_combo, 1)
         btn_add_coll = QPushButton("+"); btn_add_coll.setObjectName("success")
-        btn_add_coll.setFixedSize(26, 26); btn_add_coll.setToolTip("Add to selected collection")
+        btn_add_coll.setFixedSize(Z(26), Z(26)); btn_add_coll.setToolTip("Add to selected collection")
         btn_add_coll.clicked.connect(self._detail_add_to_collection)
         coll_row.addWidget(btn_add_coll)
         btn_new_coll = QPushButton("New"); btn_new_coll.setObjectName("neutral")
-        btn_new_coll.setFixedSize(40, 26); btn_new_coll.setToolTip("Create new collection")
+        btn_new_coll.setFixedSize(Z(40), Z(26)); btn_new_coll.setToolTip("Create new collection")
         btn_new_coll.clicked.connect(self._detail_create_collection)
         coll_row.addWidget(btn_new_coll)
         lay.addLayout(coll_row)
 
         # Collection chips (shows which collections this clip belongs to)
         self._detail_coll_chips = QWidget(); self._detail_coll_chips.setStyleSheet("background:transparent;")
-        self._detail_coll_chips_lay = FlowLayout(self._detail_coll_chips, h_spacing=4, v_spacing=4)
+        self._detail_coll_chips_lay = FlowLayout(self._detail_coll_chips, h_spacing=Z(4), v_spacing=Z(4))
         self._detail_coll_chips_lay.setContentsMargins(0,0,0,0)
         lay.addWidget(self._detail_coll_chips)
 
         # ── Action buttons ────────────────────────────────────────────────
         btn_row1 = QHBoxLayout()
         self.btn_detail_play = QPushButton("Open File")
-        self.btn_detail_play.setObjectName("success"); self.btn_detail_play.setFixedHeight(30)
+        self.btn_detail_play.setObjectName("success"); self.btn_detail_play.setFixedHeight(Z(30))
         self.btn_detail_play.clicked.connect(self._detail_play)
         btn_row1.addWidget(self.btn_detail_play)
         self.btn_detail_copy_m3u8 = QPushButton("Copy M3U8")
-        self.btn_detail_copy_m3u8.setObjectName("neutral"); self.btn_detail_copy_m3u8.setFixedHeight(30)
+        self.btn_detail_copy_m3u8.setObjectName("neutral"); self.btn_detail_copy_m3u8.setFixedHeight(Z(30))
         self.btn_detail_copy_m3u8.clicked.connect(self._detail_copy_m3u8)
         btn_row1.addWidget(self.btn_detail_copy_m3u8)
         self.btn_detail_open_folder = QPushButton("Folder")
-        self.btn_detail_open_folder.setObjectName("neutral"); self.btn_detail_open_folder.setFixedHeight(30)
+        self.btn_detail_open_folder.setObjectName("neutral"); self.btn_detail_open_folder.setFixedHeight(Z(30))
         self.btn_detail_open_folder.clicked.connect(self._detail_open_file)
         btn_row1.addWidget(self.btn_detail_open_folder)
         self.btn_detail_source = QPushButton("Web")
-        self.btn_detail_source.setObjectName("neutral"); self.btn_detail_source.setFixedHeight(30)
+        self.btn_detail_source.setObjectName("neutral"); self.btn_detail_source.setFixedHeight(Z(30))
         self.btn_detail_source.clicked.connect(self._detail_open_source)
         btn_row1.addWidget(self.btn_detail_source)
         lay.addLayout(btn_row1)
@@ -4237,8 +5253,8 @@ class MainWindow(QMainWindow):
         fav = int(_g('favorited') or 0)
         self.btn_detail_fav.setText('\u2665' if fav else '\u2661')
         self.btn_detail_fav.setStyleSheet(
-            f"font-size:18px; background:transparent; border:none; "
-            f"color:{'#f38ba8' if fav else '#45475a'};")
+            f"font-size:{Z(18)}px; background:transparent; border:none; "
+            f"color:{C('error') if fav else C('border_light')};")
 
         # ── Star rating ───────────────────────────────────────────────────
         self.detail_stars.set_rating(int(_g('user_rating') or 0))
@@ -4262,17 +5278,18 @@ class MainWindow(QMainWindow):
                 cand = os.path.join(thumb_dir, f"{clip_id}.jpg")
                 if os.path.isfile(cand): pm = QPixmap(cand)
             if pm and not pm.isNull():
-                scaled = pm.scaled(408, 200, Qt.AspectRatioMode.KeepAspectRatio,
+                tw, _th = Z(408), Z(200)
+                scaled = pm.scaled(tw, _th, Qt.AspectRatioMode.KeepAspectRatio,
                                    Qt.TransformationMode.SmoothTransformation)
-                canvas = QPixmap(408, 200); canvas.fill(QColor('#11111b'))
+                canvas = QPixmap(tw, _th); canvas.fill(QColor(C('bg_deep')))
                 painter = QPainter(canvas)
-                painter.drawPixmap((408-scaled.width())//2, (200-scaled.height())//2, scaled)
+                painter.drawPixmap((tw-scaled.width())//2, (_th-scaled.height())//2, scaled)
                 painter.end()
                 self.detail_thumb.setPixmap(canvas)
             else:
                 self.detail_thumb.setText("No thumbnail")
                 self.detail_thumb.setStyleSheet(
-                    "background:#11111b; border-radius:6px; color:#45475a; font-size:13px;")
+                    f"background:{C('bg_video')}; border-radius:{Z(6)}px; color:{C('border_light')}; font-size:{Z(12)}px;")
 
         # ── Metadata rows ─────────────────────────────────────────────────
         while self._detail_meta_lay.count():
@@ -4280,23 +5297,23 @@ class MainWindow(QMainWindow):
             if item.widget(): item.widget().deleteLater()
 
         meta_fields = [
-            ('Creator',    _g('creator'),    '#f9e2af'),
-            ('Collection', _g('collection'), '#a6e3a1'),
-            ('Resolution', _g('resolution'), '#cba6f7'),
-            ('Duration',   _g('duration'),   '#89b4fa'),
-            ('FPS',        _g('frame_rate'), '#89b4fa'),
-            ('Camera',     _g('camera'),     '#cdd6f4'),
-            ('Formats',    _g('formats'),    '#cdd6f4'),
+            ('Creator',    _g('creator'),    C('warning')),
+            ('Collection', _g('collection'), C('success')),
+            ('Resolution', _g('resolution'), C('purple')),
+            ('Duration',   _g('duration'),   C('accent')),
+            ('FPS',        _g('frame_rate'), C('accent')),
+            ('Camera',     _g('camera'),     C('text')),
+            ('Formats',    _g('formats'),    C('text')),
             ('Status',     ('\u2713 Downloaded' if has_local else ('\u2717 Error' if _g('dl_status')=='error' else '\u2014')),
-                          '#a6e3a1' if has_local else ('#f38ba8' if _g('dl_status')=='error' else '#45475a')),
-            ('Clip ID',    clip_id,          '#6c7086'),
+                          C('success') if has_local else (C('error') if _g('dl_status')=='error' else C('border_light'))),
+            ('Clip ID',    clip_id,          C('text_muted')),
         ]
         for label, val, color in meta_fields:
             if not val: continue
             row_w = QWidget(); row_w.setStyleSheet("background:transparent;")
-            row_h = QHBoxLayout(row_w); row_h.setContentsMargins(0,0,0,0); row_h.setSpacing(8)
-            lbl_k = QLabel(label+":"); lbl_k.setStyleSheet("color:#6c7086; font-size:10px; font-weight:600;"); lbl_k.setFixedWidth(72)
-            lbl_v = QLabel(val); lbl_v.setStyleSheet(f"color:{color}; font-size:10px;"); lbl_v.setWordWrap(True)
+            row_h = QHBoxLayout(row_w); row_h.setContentsMargins(0,0,0,0); row_h.setSpacing(Z(8))
+            lbl_k = QLabel(label+":"); lbl_k.setStyleSheet(f"color:{C('text_muted')}; font-size:{Z(10)}px; font-weight:600;"); lbl_k.setFixedWidth(Z(72))
+            lbl_v = QLabel(val); lbl_v.setStyleSheet(f"color:{color}; font-size:{Z(10)}px;"); lbl_v.setWordWrap(True)
             row_h.addWidget(lbl_k); row_h.addWidget(lbl_v, 1)
             self._detail_meta_lay.addWidget(row_w)
 
@@ -4304,23 +5321,23 @@ class MainWindow(QMainWindow):
         tags_raw = _g('tags')
         tags = [t.strip() for t in tags_raw.split(',') if t.strip()]
         if tags:
-            tag_sep = QLabel("Tags"); tag_sep.setStyleSheet("color:#6c7086; font-size:10px; font-weight:600; margin-top:4px;")
+            tag_sep = QLabel("Tags"); tag_sep.setStyleSheet(f"color:{C('text_muted')}; font-size:{Z(10)}px; font-weight:600; margin-top:{Z(4)}px;")
             self._detail_meta_lay.addWidget(tag_sep)
             chips_w = QWidget(); chips_w.setStyleSheet("background:transparent;")
-            chips_lay = FlowLayout(chips_w, h_spacing=4, v_spacing=4)
+            chips_lay = FlowLayout(chips_w, h_spacing=Z(4), v_spacing=Z(4))
             chips_lay.setContentsMargins(0,0,0,0)
             for t in tags:
-                chip = QPushButton(t); chip.setObjectName('tag-chip'); chip.setFixedHeight(18)
+                chip = QPushButton(t); chip.setObjectName('tag-chip'); chip.setFixedHeight(Z(18))
                 chip.clicked.connect(lambda _, tag=t: self._on_tag_clicked(tag))
                 chips_lay.addWidget(chip)
             chips_w.setLayout(chips_lay)
             self._detail_meta_lay.addWidget(chips_w)
 
         if m3u8:
-            url_lbl = QLabel("M3U8:"); url_lbl.setStyleSheet("color:#6c7086; font-size:10px; font-weight:600; margin-top:4px;")
+            url_lbl = QLabel("M3U8:"); url_lbl.setStyleSheet(f"color:{C('text_muted')}; font-size:{Z(10)}px; font-weight:600; margin-top:4px;")
             self._detail_meta_lay.addWidget(url_lbl)
             url_val = QLabel(m3u8[:60]+("..." if len(m3u8)>60 else ""))
-            url_val.setStyleSheet("color:#89b4fa; font-size:9px; font-family:Consolas,monospace;")
+            url_val.setStyleSheet(f"color:{C('accent_hover')}; font-size:{Z(9)}px; font-family:'Cascadia Code','JetBrains Mono',Consolas,monospace;")
             url_val.setCursor(Qt.CursorShape.PointingHandCursor); url_val.setToolTip(m3u8)
             url_val.mousePressEvent = lambda e, u=m3u8: (QApplication.clipboard().setText(u),
                                                           self._toast("M3U8 copied", 'success', 1500))
@@ -4366,11 +5383,11 @@ class MainWindow(QMainWindow):
         try:
             for c in self.db.get_clip_collections(clip_id):
                 chip = QPushButton(f"\u00d7 {c['name']}")
-                chip.setFixedHeight(18)
+                chip.setFixedHeight(Z(18))
                 chip.setStyleSheet(
                     f"background:{c['color']}33; color:{c['color']}; "
-                    f"font-size:9px; font-weight:700; padding:1px 6px; "
-                    f"border-radius:3px; border:1px solid {c['color']}55;")
+                    f"font-size:{Z(9)}px; font-weight:700; padding:{Z(1)}px {Z(6)}px; "
+                    f"border-radius:{Z(3)}px; border:1px solid {c['color']}55;")
                 chip.setCursor(Qt.CursorShape.PointingHandCursor)
                 chip.setToolTip(f"Remove from {c['name']}")
                 cid_copy = c['id']
@@ -4379,23 +5396,106 @@ class MainWindow(QMainWindow):
                 self._detail_coll_chips_lay.addWidget(chip)
         except Exception: pass
 
-    def _on_card_clicked(self, row, card=None):
-        """Show clip in detail panel and highlight the selected card."""
-        # Deselect previous card
+    def _card_highlight(self, card, style="selected"):
+        if style == "selected":
+            card.setStyleSheet(f"QFrame#clip-card {{ border: 1px solid {C('accent')}; background-color: {C('sel_bg')}; }}")
+        elif style == "multi":
+            card.setStyleSheet(f"QFrame#clip-card {{ border: 1px solid {C('purple')}; background-color: {C('multi_bg')}; }}")
+
+    def _card_unhighlight(self, card):
+        try: card.setStyleSheet("")
+        except RuntimeError: pass
+
+    def _deselect_all_cards(self):
+        for c, _r in getattr(self, '_selected_cards', []):
+            self._card_unhighlight(c)
+        self._selected_cards = []
+        if self._selected_card:
+            self._card_unhighlight(self._selected_card)
+        self._selected_card = None
+        self._last_click_idx = -1
+        if hasattr(self, 'lbl_result_count'):
+            self._update_selection_label()
+
+    def _select_all_cards(self):
+        if not hasattr(self, 'tabs') or self.tabs.currentIndex() != 1:
+            return
+        self._deselect_all_cards()
+        for card in self._current_cards:
+            row = getattr(card, '_row', None)
+            if row:
+                self._selected_cards.append((card, row))
+                self._card_highlight(card, "multi")
+        self._last_click_idx = len(self._current_cards) - 1 if self._current_cards else -1
+        self._update_selection_label()
+
+    def _update_selection_label(self):
+        n = len(getattr(self, '_card_rows_all', []))
+        shown = getattr(self, '_card_show_count', n)
+        sel = len(self._selected_cards)
+        suffix = f" (showing {shown})" if shown < n else ""
+        sel_str = f"  |  {sel} selected" if sel > 1 else ""
+        self.lbl_result_count.setText(f"{n} clip{'s' if n!=1 else ''}{suffix}{sel_str}")
+
+    def _on_card_clicked(self, row, card=None, modifiers=None):
+        """Show clip in detail panel. Supports Ctrl+click multi-select and Shift+click range."""
+        if modifiers is None:
+            modifiers = QApplication.keyboardModifiers()
+        card_idx = self._current_cards.index(card) if card and card in self._current_cards else -1
+
+        # Ctrl+click: toggle card in multi-select
+        if modifiers & Qt.KeyboardModifier.ControlModifier and card:
+            existing = [c for c, r in self._selected_cards if c is card]
+            if existing:
+                self._selected_cards = [(c, r) for c, r in self._selected_cards if c is not card]
+                self._card_unhighlight(card)
+            else:
+                self._selected_cards.append((card, row))
+                self._card_highlight(card, "multi")
+            self._last_click_idx = card_idx
+            self._update_selection_label()
+            return
+
+        # Shift+click: range select
+        if modifiers & Qt.KeyboardModifier.ShiftModifier and card and self._last_click_idx >= 0:
+            start = min(self._last_click_idx, card_idx)
+            end = max(self._last_click_idx, card_idx)
+            for c, _r in self._selected_cards:
+                self._card_unhighlight(c)
+            self._selected_cards = []
+            for i in range(start, end + 1):
+                if i < len(self._current_cards):
+                    c = self._current_cards[i]
+                    r = getattr(c, '_row', None)
+                    if r:
+                        self._selected_cards.append((c, r))
+                        self._card_highlight(c, "multi")
+            self._update_selection_label()
+            return
+
+        # Normal click: single select
+        if self._selected_cards:
+            self._deselect_all_cards()
         if self._selected_card and self._selected_card is not card:
-            self._selected_card.setStyleSheet("")  # revert to theme default
-        # Highlight new card
+            self._card_unhighlight(self._selected_card)
         if card:
-            card.setStyleSheet("QFrame#clip-card { border: 2px solid #89b4fa; background-color: #1e1e35; }")
+            self._card_highlight(card, "selected")
             self._selected_card = card
+        self._last_click_idx = card_idx
+        if getattr(self, '_catalog_mode', False):
+            self._detail_panel.setVisible(True)
+            total = self._search_splitter.width()
+            self._search_splitter.setSizes([total - Z(380), Z(380)])
         self._show_detail(row)
+        self._update_selection_label()
 
     def _on_card_press(self, event, row, card):
         """Handle left click (select) and right click (context menu) on cards."""
         if event.button() == Qt.MouseButton.RightButton:
-            self._card_context_menu(event.globalPosition().toPoint(), row)
+            self._card_context_menu(event.globalPosition().toPoint(), row, card)
         else:
-            self._on_card_clicked(row, card)
+            mods = event.modifiers() if hasattr(event, 'modifiers') else QApplication.keyboardModifiers()
+            self._on_card_clicked(row, card, mods)
 
     def _detail_play(self):
         """Open clip in system default player."""
@@ -4438,25 +5538,47 @@ class MainWindow(QMainWindow):
         if source:
             import webbrowser; webbrowser.open(source)
 
-    def _card_context_menu(self, global_pos, row):
-        """Right-click context menu for clip cards in grid view."""
+    def _card_context_menu(self, global_pos, row, card=None):
+        """Right-click context menu for clip cards — supports multi-select."""
         menu = QMenu(self)
         keys = row.keys() if hasattr(row, 'keys') else []
         def _g(k): return str(row[k] if k in keys and row[k] else '')
         cid = _g('clip_id')
         if not cid: return
 
+        # Determine if operating on multi-selection or single card
+        multi = len(self._selected_cards) > 1
+        if multi:
+            clip_ids = [str(r.get('clip_id', '') if isinstance(r, dict) else r['clip_id']) for _c, r in self._selected_cards]
+            clip_ids = [c for c in clip_ids if c]
+            sel_rows = [r for _c, r in self._selected_cards]
+            header = menu.addAction(f"{len(clip_ids)} clips selected")
+            header.setEnabled(False)
+            menu.addSeparator()
+        else:
+            clip_ids = [cid]
+            sel_rows = [row]
+
+        # Select All / Deselect All
+        act_sel_all = menu.addAction("Select All Visible")
+        act_sel_all.triggered.connect(self._select_all_cards)
+        if self._selected_cards:
+            act_desel = menu.addAction("Deselect All")
+            act_desel.triggered.connect(self._deselect_all_cards)
+        menu.addSeparator()
+
         # Favorite toggle
         fav = int(_g('favorited') or 0)
-        act_fav = menu.addAction("\u2665 Unfavorite" if fav else "\u2661 Favorite")
-        act_fav.triggered.connect(lambda: self._ctx_toggle_favorites([cid]))
+        fav_label = f"Toggle Favorites ({len(clip_ids)})" if multi else ("\u2665 Unfavorite" if fav else "\u2661 Favorite")
+        act_fav = menu.addAction(fav_label)
+        act_fav.triggered.connect(lambda: self._ctx_toggle_favorites(clip_ids))
 
         # Rating submenu
         rating_menu = menu.addMenu("\u2605 Set Rating")
         for stars in range(6):
             label = "\u2605" * stars + "\u2606" * (5 - stars) if stars > 0 else "Clear Rating"
             act_r = rating_menu.addAction(label)
-            act_r.triggered.connect(lambda _, r=stars: self._ctx_set_rating([cid], r))
+            act_r.triggered.connect(lambda _, r=stars: self._ctx_set_rating(clip_ids, r))
 
         # Collection submenu
         coll_menu = menu.addMenu("Add to Collection")
@@ -4464,29 +5586,31 @@ class MainWindow(QMainWindow):
             for c in self.db.get_collections():
                 act_c = coll_menu.addAction(c['name'])
                 cid_copy = c['id']
-                act_c.triggered.connect(lambda _, ci=cid_copy: self._ctx_add_to_collection([cid], ci))
+                act_c.triggered.connect(lambda _, ci=cid_copy: self._ctx_add_to_collection(clip_ids, ci))
         except Exception: pass
         coll_menu.addSeparator()
         act_new_coll = coll_menu.addAction("+ New Collection...")
-        act_new_coll.triggered.connect(lambda: self._ctx_new_collection([cid]))
+        act_new_coll.triggered.connect(lambda: self._ctx_new_collection(clip_ids))
 
         menu.addSeparator()
 
-        # Download
-        if _g('m3u8_url'):
-            act_dl = menu.addAction("Download")
-            act_dl.triggered.connect(lambda: self._start_downloads([row]))
+        # Download (single or bulk)
+        has_m3u8 = [r for r in sel_rows if (r.get('m3u8_url') if isinstance(r, dict) else r['m3u8_url'])]
+        if has_m3u8:
+            dl_label = f"Download {len(has_m3u8)} clips" if multi else "Download"
+            act_dl = menu.addAction(dl_label)
+            act_dl.triggered.connect(lambda: self._start_downloads(has_m3u8))
 
-        # Copy M3U8
-        if _g('m3u8_url'):
+        # Copy M3U8 (single only)
+        if not multi and _g('m3u8_url'):
             act_copy = menu.addAction("Copy M3U8 URL")
             act_copy.triggered.connect(lambda: (
                 QApplication.clipboard().setText(_g('m3u8_url')),
                 self._toast("M3U8 copied", 'success', 1500)))
 
         # Open in browser
-        act_browser = menu.addAction("Open in Browser")
-        act_browser.triggered.connect(lambda: self._ctx_open_source_urls_by_ids([cid]))
+        act_browser = menu.addAction("Open in Browser" + (f" ({len(clip_ids)})" if multi else ""))
+        act_browser.triggered.connect(lambda: self._ctx_open_source_urls_by_ids(clip_ids))
 
         menu.exec(global_pos)
 
@@ -4514,8 +5638,8 @@ class MainWindow(QMainWindow):
         new_state = self.db.toggle_favorite(cid)
         self.btn_detail_fav.setText('\u2665' if new_state else '\u2661')
         self.btn_detail_fav.setStyleSheet(
-            f"font-size:18px; background:transparent; border:none; "
-            f"color:{'#f38ba8' if new_state else '#45475a'};")
+            f"font-size:{Z(18)}px; background:transparent; border:none; "
+            f"color:{C('error') if new_state else C('border_light')};")
         self._toast("Favorited" if new_state else "Unfavorited", 'success', 1500)
 
     def _detail_set_rating(self, rating):
@@ -4619,27 +5743,27 @@ class MainWindow(QMainWindow):
     def _build_archive_tab(self):
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setFrameShape(QFrame.Shape.NoFrame)
         w = QWidget(); scroll.setWidget(w)
-        lay = QVBoxLayout(w); lay.setContentsMargins(24,20,24,24); lay.setSpacing(16)
+        lay = QVBoxLayout(w); lay.setContentsMargins(Z(24),Z(20),Z(24),Z(24)); lay.setSpacing(Z(16))
 
         # Stats
         grp_stats = QGroupBox("Archive Statistics"); gs = QVBoxLayout(grp_stats)
         stats_cards = QHBoxLayout()
         for attr, lbl, clr in [
-            ('arc_stat_clips', 'Total Clips', '#89b4fa'),
-            ('arc_stat_m3u8',  'With M3U8',  '#a6e3a1'),
-            ('arc_stat_dl',    'Downloaded', '#a6e3a1'),
-            ('arc_stat_errors','Errors',     '#f38ba8'),
-            ('arc_stat_mb',    'Disk Used',  '#cba6f7'),
+            ('arc_stat_clips', 'Total Clips', C('accent')),
+            ('arc_stat_m3u8',  'With M3U8',  C('success')),
+            ('arc_stat_dl',    'Downloaded', C('success')),
+            ('arc_stat_errors','Errors',     C('error')),
+            ('arc_stat_mb',    'Disk Used',  C('purple')),
         ]:
-            card = QFrame(); card.setObjectName('stat-card'); card.setFixedHeight(76)
-            cl = QVBoxLayout(card); cl.setContentsMargins(14,8,14,8); cl.setSpacing(2)
-            lv = QLabel("—"); lv.setStyleSheet(f"font-size:22px; font-weight:700; color:{clr}; background:transparent;")
+            card = QFrame(); card.setObjectName('stat-card'); card.setFixedHeight(Z(76))
+            cl = QVBoxLayout(card); cl.setContentsMargins(Z(14),Z(8),Z(14),Z(8)); cl.setSpacing(Z(2))
+            lv = QLabel("—"); lv.setStyleSheet(f"font-size:{Z(22)}px; font-weight:700; color:{clr}; background:transparent;")
             lv.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            ll = QLabel(lbl); ll.setStyleSheet("color:#6c7086; font-size:11px; background:transparent;")
+            ll = QLabel(lbl); ll.setStyleSheet(f"color:{C('text_muted')}; font-size:{Z(11)}px; background:transparent;")
             ll.setAlignment(Qt.AlignmentFlag.AlignCenter)
             cl.addWidget(lv); cl.addWidget(ll); setattr(self, attr, lv); stats_cards.addWidget(card)
         gs.addLayout(stats_cards)
-        rfbtn = QPushButton("Refresh Stats"); rfbtn.setObjectName("neutral"); rfbtn.setFixedHeight(32); rfbtn.setFixedWidth(130)
+        rfbtn = QPushButton("Refresh Stats"); rfbtn.setObjectName("neutral"); rfbtn.setFixedHeight(Z(32)); rfbtn.setFixedWidth(Z(130))
         rfbtn.clicked.connect(self._refresh_archive_stats); gs.addWidget(rfbtn)
         lay.addWidget(grp_stats)
 
@@ -4647,11 +5771,11 @@ class MainWindow(QMainWindow):
         grp_verify = QGroupBox("Verify Archive  (check local files exist on disk)")
         gv = QVBoxLayout(grp_verify)
         gv.addWidget(self._sub("Scans every downloaded clip's recorded path. Flags missing files."))
-        vbtn = QPushButton("Verify Archive Integrity"); vbtn.setObjectName("warning"); vbtn.setFixedHeight(38); vbtn.setMinimumWidth(200)
+        vbtn = QPushButton("Verify Archive Integrity"); vbtn.setObjectName("warning"); vbtn.setFixedHeight(Z(38)); vbtn.setMinimumWidth(Z(200))
         vbtn.clicked.connect(self._verify_archive); gv.addWidget(vbtn)
         self.lbl_verify_result = QLabel(""); self.lbl_verify_result.setWordWrap(True)
-        self.lbl_verify_result.setStyleSheet("color:#f9e2af;"); gv.addWidget(self.lbl_verify_result)
-        rbtn = QPushButton("Reset Missing to Pending"); rbtn.setObjectName("danger"); rbtn.setFixedHeight(34); rbtn.setMinimumWidth(180)
+        self.lbl_verify_result.setStyleSheet(f"color:{C('warning')};"); gv.addWidget(self.lbl_verify_result)
+        rbtn = QPushButton("Reset Missing to Pending"); rbtn.setObjectName("danger"); rbtn.setFixedHeight(Z(34)); rbtn.setMinimumWidth(Z(180))
         rbtn.clicked.connect(self._reset_missing); gv.addWidget(rbtn)
         gv.addWidget(self._sub("Clears local_path + dl_status for missing files so they re-queue for download."))
         lay.addWidget(grp_verify)
@@ -4663,13 +5787,13 @@ class MainWindow(QMainWindow):
         scan_row = QHBoxLayout()
         self.inp_scan_dir = QLineEdit(); self.inp_scan_dir.setPlaceholderText("Folder containing .json sidecar files...")
         scan_row.addWidget(self.inp_scan_dir, 1)
-        scan_br = QPushButton("Browse..."); scan_br.setObjectName("neutral"); scan_br.setFixedWidth(90)
+        scan_br = QPushButton("Browse..."); scan_br.setObjectName("neutral"); scan_br.setFixedWidth(Z(90))
         scan_br.clicked.connect(self._browse_scan_dir); scan_row.addWidget(scan_br)
         gscan.addLayout(scan_row)
-        scanbtn = QPushButton("Scan & Import"); scanbtn.setObjectName("success"); scanbtn.setFixedHeight(38); scanbtn.setFixedWidth(160)
+        scanbtn = QPushButton("Scan & Import"); scanbtn.setObjectName("success"); scanbtn.setFixedHeight(Z(38)); scanbtn.setFixedWidth(Z(160))
         scanbtn.clicked.connect(self._scan_folder); gscan.addWidget(scanbtn)
         self.lbl_scan_result = QLabel(""); self.lbl_scan_result.setWordWrap(True)
-        self.lbl_scan_result.setStyleSheet("color:#a6e3a1;"); gscan.addWidget(self.lbl_scan_result)
+        self.lbl_scan_result.setStyleSheet(f"color:{C('success')};"); gscan.addWidget(self.lbl_scan_result)
         lay.addWidget(grp_scan)
 
         # Filename template
@@ -4678,12 +5802,12 @@ class MainWindow(QMainWindow):
         fn_row = QHBoxLayout()
         self.inp_fn_template = QLineEdit("{title}")
         fn_row.addWidget(self.inp_fn_template, 1)
-        fn_save = QPushButton("Save"); fn_save.setObjectName("neutral"); fn_save.setFixedWidth(70)
+        fn_save = QPushButton("Save"); fn_save.setObjectName("neutral"); fn_save.setFixedWidth(Z(70))
         fn_save.clicked.connect(self._save_fn_template); fn_row.addWidget(fn_save)
         gfn.addLayout(fn_row)
         gfn.addWidget(self._sub("Example: {creator}/{title}_{clip_id}  creates subfolders per creator."))
         self.lbl_fn_preview = QLabel("")
-        self.lbl_fn_preview.setStyleSheet("color:#89b4fa; font-size:11px; font-family:Consolas,monospace;")
+        self.lbl_fn_preview.setStyleSheet(f"color:{C('accent_hover')}; font-size:{Z(11)}px; font-family:'Cascadia Code','JetBrains Mono',Consolas,monospace;")
         gfn.addWidget(self.lbl_fn_preview)
         self.inp_fn_template.textChanged.connect(self._update_fn_preview)
         lay.addWidget(grp_fn)
@@ -4692,15 +5816,46 @@ class MainWindow(QMainWindow):
         grp_retry = QGroupBox("Retry Errors"); gr = QVBoxLayout(grp_retry)
         gr.addWidget(self._sub("Re-queue all clips that failed download."))
         retry_row = QHBoxLayout()
-        self.lbl_error_count = QLabel("0 errors"); self.lbl_error_count.setStyleSheet("color:#f38ba8; font-weight:600;")
+        self.lbl_error_count = QLabel("0 errors"); self.lbl_error_count.setStyleSheet(f"color:{C('error')}; font-weight:600;")
         retry_row.addWidget(self.lbl_error_count)
-        rbtn2 = QPushButton("Retry All Errors"); rbtn2.setObjectName("warning"); rbtn2.setFixedHeight(36)
+        rbtn2 = QPushButton("Retry All Errors"); rbtn2.setObjectName("warning"); rbtn2.setFixedHeight(Z(36))
         rbtn2.clicked.connect(self._retry_all_errors); retry_row.addWidget(rbtn2)
         retry_row.addStretch(); gr.addLayout(retry_row)
         lay.addWidget(grp_retry)
 
+        # Quick access
+        grp_paths = QGroupBox("Quick Access"); gp = QVBoxLayout(grp_paths)
+        path_row = QHBoxLayout()
+        btn_cfg_dir = QPushButton("Open Config Directory"); btn_cfg_dir.setObjectName("neutral"); btn_cfg_dir.setFixedHeight(Z(34))
+        btn_cfg_dir.setToolTip(f"Opens: {get_config_dir()}")
+        btn_cfg_dir.clicked.connect(lambda: self._open_path(get_config_dir()))
+        path_row.addWidget(btn_cfg_dir)
+        btn_db_dir = QPushButton("Open Database File"); btn_db_dir.setObjectName("neutral"); btn_db_dir.setFixedHeight(Z(34))
+        btn_db_dir.setToolTip(f"Opens: {self._db_path}")
+        btn_db_dir.clicked.connect(lambda: self._open_path(os.path.dirname(self._db_path)))
+        path_row.addWidget(btn_db_dir)
+        btn_out_dir = QPushButton("Open Output Directory"); btn_out_dir.setObjectName("neutral"); btn_out_dir.setFixedHeight(Z(34))
+        btn_out_dir.clicked.connect(lambda: self._open_path(self._out_dir()))
+        path_row.addWidget(btn_out_dir)
+        path_row.addStretch(); gp.addLayout(path_row)
+        cfg_path_lbl = QLabel(f"Config: {get_config_dir()}")
+        cfg_path_lbl.setStyleSheet(f"color:{C('text_muted')}; font-size:{Z(10)}px; font-family:'Cascadia Code','JetBrains Mono',Consolas,monospace;")
+        cfg_path_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        gp.addWidget(cfg_path_lbl)
+        lay.addWidget(grp_paths)
+
         lay.addStretch()
         return scroll
+
+    def _open_path(self, path):
+        """Open a file or directory in the system file manager."""
+        try:
+            os.makedirs(path, exist_ok=True)
+            if sys.platform == 'win32':    os.startfile(path)
+            elif sys.platform == 'darwin': subprocess.Popen(['open', path])
+            else:                          subprocess.Popen(['xdg-open', path])
+        except Exception as e:
+            self._toast(f"Could not open: {e}", 'error', 3000)
 
     def _refresh_archive_stats(self):
         try:
@@ -4724,10 +5879,10 @@ class MainWindow(QMainWindow):
             missing = [r['clip_id'] for r in rows if not os.path.isfile(r['local_path'] or '')]
             total = len(rows)
             if not missing:
-                self.lbl_verify_result.setStyleSheet("color:#a6e3a1;")
+                self.lbl_verify_result.setStyleSheet(f"color:{C('success')};")
                 self.lbl_verify_result.setText(f"All {total} downloaded files verified OK.")
             else:
-                self.lbl_verify_result.setStyleSheet("color:#f38ba8;")
+                self.lbl_verify_result.setStyleSheet(f"color:{C('error')};")
                 self.lbl_verify_result.setText(
                     f"{len(missing)} of {total} files missing: "+", ".join(missing[:8])+("..." if len(missing)>8 else ""))
         except Exception as e: self.lbl_verify_result.setText(f"Error: {e}")
@@ -4741,7 +5896,7 @@ class MainWindow(QMainWindow):
                     self.db.execute("UPDATE clips SET local_path='', dl_status='' WHERE clip_id=?", (r['clip_id'],))
                     count += 1
             self.db.commit()
-            self.lbl_verify_result.setStyleSheet("color:#f9e2af;")
+            self.lbl_verify_result.setStyleSheet(f"color:{C('warning')};")
             self.lbl_verify_result.setText(f"Reset {count} missing file records to pending.")
             self._do_search()
         except Exception as e: self.lbl_verify_result.setText(f"Error: {e}")
@@ -4806,7 +5961,7 @@ class MainWindow(QMainWindow):
 
     def _build_download_tab(self):
         w = QWidget(); lay = QVBoxLayout(w)
-        lay.setContentsMargins(20,16,20,16); lay.setSpacing(12)
+        lay.setContentsMargins(Z(20),Z(16),Z(20),Z(16)); lay.setSpacing(Z(12))
 
         # ── Directory row ──────────────────────────────────────────────────
         dirgrp = QGroupBox("Download Settings")
@@ -4815,35 +5970,35 @@ class MainWindow(QMainWindow):
         self.inp_dl_dir = QLineEdit()
         self.inp_dl_dir.setPlaceholderText("Select folder where MP4 files will be saved...")
         dlay.addWidget(self.inp_dl_dir, 1)
-        br = QPushButton("Browse..."); br.setObjectName("neutral"); br.setFixedWidth(90)
+        br = QPushButton("Browse..."); br.setObjectName("neutral"); br.setFixedWidth(Z(90))
         br.clicked.connect(self._browse_dl_dir); dlay.addWidget(br)
         dglay.addLayout(dlay)
         self.chk_auto_dl = QCheckBox("Auto-download -- start downloading each clip immediately as it is scraped")
         self.chk_auto_dl.setChecked(True)
-        self.chk_auto_dl.setStyleSheet("font-weight:600; color:#a6e3a1;")
+        self.chk_auto_dl.setStyleSheet(f"font-weight:500; color:{C('success')};")
         dglay.addWidget(self.chk_auto_dl)
 
         # ── Concurrent / retry / bandwidth settings ────────────────────────
-        perf_row = QHBoxLayout(); perf_row.setSpacing(12)
+        perf_row = QHBoxLayout(); perf_row.setSpacing(Z(12))
 
         perf_row.addWidget(QLabel("Concurrent:"))
-        self.spin_concurrent = QSpinBox(); self.spin_concurrent.setRange(1, 8)
-        self.spin_concurrent.setValue(2); self.spin_concurrent.setFixedWidth(60)
-        self.spin_concurrent.setToolTip("Number of parallel downloads")
+        self.spin_concurrent = QSpinBox(); self.spin_concurrent.setRange(1, 32)
+        self.spin_concurrent.setValue(4); self.spin_concurrent.setFixedWidth(Z(60))
+        self.spin_concurrent.setToolTip("Number of parallel downloads (higher = faster bulk downloads)")
         perf_row.addWidget(self.spin_concurrent)
 
-        perf_row.addSpacing(10)
+        perf_row.addSpacing(Z(10))
         perf_row.addWidget(QLabel("Max Retries:"))
-        self.spin_max_retries = QSpinBox(); self.spin_max_retries.setRange(0, 10)
-        self.spin_max_retries.setValue(3); self.spin_max_retries.setFixedWidth(60)
+        self.spin_max_retries = QSpinBox(); self.spin_max_retries.setRange(0, 25)
+        self.spin_max_retries.setValue(5); self.spin_max_retries.setFixedWidth(Z(60))
         self.spin_max_retries.setToolTip("Auto-retry failed downloads with exponential backoff")
         perf_row.addWidget(self.spin_max_retries)
 
-        perf_row.addSpacing(10)
+        perf_row.addSpacing(Z(10))
         perf_row.addWidget(QLabel("Speed Limit:"))
-        self.spin_bw_limit = QSpinBox(); self.spin_bw_limit.setRange(0, 100000)
+        self.spin_bw_limit = QSpinBox(); self.spin_bw_limit.setRange(0, 500000)
         self.spin_bw_limit.setValue(0); self.spin_bw_limit.setSuffix(" KB/s")
-        self.spin_bw_limit.setFixedWidth(120)
+        self.spin_bw_limit.setFixedWidth(Z(120))
         self.spin_bw_limit.setToolTip("Max download speed (0 = unlimited)")
         perf_row.addWidget(self.spin_bw_limit)
         perf_row.addStretch()
@@ -4853,22 +6008,22 @@ class MainWindow(QMainWindow):
 
         # ── Queue stats banner ─────────────────────────────────────────────
         stats_row = QHBoxLayout()
-        self.lbl_dl_queue  = self._hdr_lbl("Ready: 0",      "#89b4fa")
-        self.lbl_dl_done   = self._hdr_lbl("Downloaded: 0", "#a6e3a1")
-        self.lbl_dl_errors = self._hdr_lbl("Errors: 0",     "#f38ba8")
+        self.lbl_dl_queue  = self._hdr_lbl("Ready: 0",      "{C('accent')}")
+        self.lbl_dl_done   = self._hdr_lbl("Downloaded: 0", "{C('success')}")
+        self.lbl_dl_errors = self._hdr_lbl("Errors: 0",     "{C('error')}")
         for lb in (self.lbl_dl_queue, self.lbl_dl_done, self.lbl_dl_errors):
-            stats_row.addWidget(lb); stats_row.addSpacing(24)
+            stats_row.addWidget(lb); stats_row.addSpacing(Z(24))
         stats_row.addStretch()
         lay.addLayout(stats_row)
 
         # Overall progress bar
         self.dl_overall_bar = QProgressBar()
-        self.dl_overall_bar.setFixedHeight(8); self.dl_overall_bar.setTextVisible(False)
+        self.dl_overall_bar.setFixedHeight(Z(8)); self.dl_overall_bar.setTextVisible(False)
         self.dl_overall_bar.setVisible(False); lay.addWidget(self.dl_overall_bar)
 
         # Current item progress bar
         self.dl_item_bar = QProgressBar()
-        self.dl_item_bar.setFixedHeight(8); self.dl_item_bar.setRange(0,100)
+        self.dl_item_bar.setFixedHeight(Z(8)); self.dl_item_bar.setRange(0,100)
         self.dl_item_bar.setFormat("%p%")
         self.dl_item_bar.setVisible(False); lay.addWidget(self.dl_item_bar)
 
@@ -4878,22 +6033,22 @@ class MainWindow(QMainWindow):
         # ── Buttons row ────────────────────────────────────────────────────
         brow = QHBoxLayout()
         self.btn_dl_all = QPushButton("⬇  Download All with M3U8")
-        self.btn_dl_all.setObjectName("success"); self.btn_dl_all.setFixedHeight(40)
+        self.btn_dl_all.setObjectName("success"); self.btn_dl_all.setFixedHeight(Z(40))
         self.btn_dl_all.clicked.connect(self._dl_all)
 
         self.btn_dl_new = QPushButton("⬇  Download New Only")
-        self.btn_dl_new.setObjectName("success"); self.btn_dl_new.setFixedHeight(40)
+        self.btn_dl_new.setObjectName("success"); self.btn_dl_new.setFixedHeight(Z(40))
         self.btn_dl_new.clicked.connect(self._dl_new)
 
         self.btn_dl_sel = QPushButton("⬇  Download Selected")
-        self.btn_dl_sel.setObjectName("neutral"); self.btn_dl_sel.setFixedHeight(40)
+        self.btn_dl_sel.setObjectName("neutral"); self.btn_dl_sel.setFixedHeight(Z(40))
         self.btn_dl_sel.clicked.connect(self._dl_selected)
 
         self.btn_dl_stop = QPushButton("⏹  Stop")
-        self.btn_dl_stop.setObjectName("danger"); self.btn_dl_stop.setFixedHeight(40)
+        self.btn_dl_stop.setObjectName("danger"); self.btn_dl_stop.setFixedHeight(Z(40))
         self.btn_dl_stop.setEnabled(False); self.btn_dl_stop.clicked.connect(self._dl_stop)
 
-        opn = QPushButton("📂  Open Folder"); opn.setObjectName("neutral"); opn.setFixedHeight(40)
+        opn = QPushButton("📂  Open Folder"); opn.setObjectName("neutral"); opn.setFixedHeight(Z(40))
         opn.clicked.connect(self._open_dl_folder)
 
         for b in (self.btn_dl_all, self.btn_dl_new, self.btn_dl_sel, self.btn_dl_stop, opn):
@@ -4901,7 +6056,7 @@ class MainWindow(QMainWindow):
         lay.addLayout(brow)
 
         # ── Download queue table ───────────────────────────────────────────
-        lbl = QLabel("Download Queue"); lbl.setStyleSheet("color:#6c7086; font-size:11px; font-weight:600;")
+        lbl = QLabel("Download Queue"); lbl.setStyleSheet(f"color:{C('text_muted')}; font-size:{Z(11)}px; font-weight:600;")
         lay.addWidget(lbl)
 
         DL_COLS = [("Title",70), ("Status",90), ("Progress",160), ("File",300)]
@@ -4923,10 +6078,10 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.dl_table, 1)
 
         # Log
-        lbl2 = QLabel("Log"); lbl2.setStyleSheet("color:#6c7086; font-size:11px; font-weight:600;")
+        lbl2 = QLabel("Log"); lbl2.setStyleSheet(f"color:{C('text_muted')}; font-size:{Z(11)}px; font-weight:600;")
         lay.addWidget(lbl2)
         self.dl_log = QTextEdit(); self.dl_log.setReadOnly(True)
-        self.dl_log.setMaximumHeight(140)
+        self.dl_log.setMaximumHeight(Z(140))
         self.dl_log.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap); lay.addWidget(self.dl_log)
 
         return w
@@ -4935,28 +6090,53 @@ class MainWindow(QMainWindow):
 
     def _build_export_tab(self):
         w = QWidget(); lay = QVBoxLayout(w)
-        lay.setContentsMargins(24,20,24,20); lay.setSpacing(14); lay.addStretch()
+        lay.setContentsMargins(Z(24),Z(20),Z(24),Z(20)); lay.setSpacing(Z(14)); lay.addStretch()
 
         lbl = QLabel("Export Collected Data")
-        lbl.setStyleSheet("font-size:18px; font-weight:700; color:#cdd6f4;"); lay.addWidget(lbl)
-        lay.addWidget(self._sub("All exports go to your configured output directory.")); lay.addSpacing(16)
+        lbl.setStyleSheet(f"font-size:{Z(18)}px; font-weight:700; color:{C('text')};"); lay.addWidget(lbl)
+        lay.addWidget(self._sub("All exports go to your configured output directory.")); lay.addSpacing(Z(16))
 
+        # Export all data
+        grp_all = QGroupBox("Export All Clips")
+        ga = QVBoxLayout(grp_all)
         for text, obj, fn in [
-            ("📄  M3U8 URLs only  (.txt)",            "success", self._export_txt),
-            ("📋  Full metadata  (.json)",             "success", self._export_json),
-            ("🎵  Media player playlist  (.m3u)",     "success", self._export_m3u),
-            ("📊  Spreadsheet  (.csv — all fields)",  "success", self._export_csv),
-            ("📂  Export all four formats at once",   None,      self._export_all),
+            ("M3U8 URLs only  (.txt)",            "success", self._export_txt),
+            ("Full metadata  (.json)",             "success", self._export_json),
+            ("Media player playlist  (.m3u)",     "success", self._export_m3u),
+            ("Spreadsheet  (.csv -- all fields)",  "success", self._export_csv),
+            ("Export all four formats at once",   None,      self._export_all),
         ]:
             btn = QPushButton(text)
             if obj: btn.setObjectName(obj)
-            btn.setFixedHeight(44); btn.setFixedWidth(440); btn.clicked.connect(fn); lay.addWidget(btn)
+            btn.setFixedHeight(Z(40)); btn.setFixedWidth(Z(440)); btn.clicked.connect(fn); ga.addWidget(btn)
+        lay.addWidget(grp_all)
 
-        lay.addSpacing(14)
+        # Export filtered / selected
+        grp_filt = QGroupBox("Export Current Search Results")
+        gf = QVBoxLayout(grp_filt)
+        gf.addWidget(self._sub("Exports only the clips matching your current search filters."))
+        for text, obj, fn in [
+            ("Filtered M3U8 URLs  (.txt)",       "neutral", lambda: self._export_txt(filtered=True)),
+            ("Filtered metadata  (.json)",       "neutral", lambda: self._export_json(filtered=True)),
+            ("Filtered playlist  (.m3u)",        "neutral", lambda: self._export_m3u(filtered=True)),
+            ("Filtered spreadsheet  (.csv)",     "neutral", lambda: self._export_csv(filtered=True)),
+        ]:
+            btn = QPushButton(text)
+            if obj: btn.setObjectName(obj)
+            btn.setFixedHeight(Z(36)); btn.setFixedWidth(Z(440)); btn.clicked.connect(fn); gf.addWidget(btn)
+        lay.addWidget(grp_filt)
+
+        lay.addSpacing(Z(14))
         self.lbl_export_status = QLabel("")
-        self.lbl_export_status.setStyleSheet("color:#a6e3a1; font-weight:600;"); lay.addWidget(self.lbl_export_status)
+        self.lbl_export_status.setStyleSheet(f"color:{C('success')}; font-weight:600;"); lay.addWidget(self.lbl_export_status)
         lay.addStretch()
         return w
+
+    def _get_export_rows(self, filtered=False):
+        """Get rows for export — all clips or current search results."""
+        if filtered and hasattr(self, '_last_rows') and self._last_rows:
+            return self._last_rows
+        return self.db.all_clips()
 
     # ── Crawl Controls ──────────────────────────────────────────────────────
 
@@ -4994,6 +6174,9 @@ class MainWindow(QMainWindow):
         # Filename template
         if hasattr(self, 'inp_fn_template'):
             cfg['fn_template'] = self.inp_fn_template.text().strip() or '{title}'
+        # UI zoom level
+        if hasattr(self, '_zoom_combo'):
+            cfg['ui_zoom'] = self._zoom_combo.currentData() or 1.0
         return cfg
 
     # ── Browser management ──────────────────────────────────────────────────
@@ -5015,7 +6198,7 @@ class MainWindow(QMainWindow):
         self.btn_install_browser.setEnabled(False)
         self.btn_install_browser.setText("Installing...")
         self.lbl_browser_status.setText("Installing Chromium browser, please wait...")
-        self.lbl_browser_status.setStyleSheet("color:#f9e2af; font-weight:600;")
+        self.lbl_browser_status.setStyleSheet(f"color:{C('warning')}; font-weight:600;")
         self.tabs.setCurrentIndex(1)  # Switch to Crawl tab so user sees output
 
         self._browser_worker = BrowserInstallWorker()
@@ -5029,13 +6212,13 @@ class MainWindow(QMainWindow):
         if success:
             self.btn_install_browser.setText("Reinstall")
             self.lbl_browser_status.setText("Chromium installed successfully!")
-            self.lbl_browser_status.setStyleSheet("color:#a6e3a1; font-weight:600;")
+            self.lbl_browser_status.setStyleSheet(f"color:{C('success')}; font-weight:600;")
             self._check_browser_status()
         else:
             self.btn_install_browser.setText("Retry Install")
             self.lbl_browser_status.setText(
                 "Install failed — check the log above. Try running: python -m playwright install chromium")
-            self.lbl_browser_status.setStyleSheet("color:#f38ba8; font-weight:600;")
+            self.lbl_browser_status.setStyleSheet(f"color:{C('error')}; font-weight:500;")
 
     def _start_crawl(self):
         if self.worker and self.worker.isRunning(): return
@@ -5080,10 +6263,10 @@ class MainWindow(QMainWindow):
         if not self.worker: return
         if self.worker._pause.is_set():
             self.worker.resume(); self.btn_pause.setText("⏸  Pause")
-            self._set_status("Running", "#f9e2af")
+            self._set_status("Running", "{C('warning')}")
         else:
             self.worker.pause(); self.btn_pause.setText("▶  Resume")
-            self._set_status("Paused", "#cba6f7")
+            self._set_status("Paused", "{C('purple')}")
 
     def _stop_crawl(self):
         if self.worker: self.worker.stop()
@@ -5112,15 +6295,19 @@ class MainWindow(QMainWindow):
         if level == 'DEBUG' and hasattr(self, 'chk_verbose_log') and not self.chk_verbose_log.isChecked():
             return
         clr = {
-            'M3U8':'#a6e3a1','OK':'#a6e3a1','ERROR':'#f38ba8',
-            'WARN':'#f9e2af','DEBUG':'#7f849c',
-        }.get(level,'#cdd6f4')
+            'M3U8':C('success'),'OK':C('success'),'ERROR':C('error'),
+            'WARN':C('warning'),'DEBUG':'#6a6a86',
+        }.get(level,C('text'))
         ts = datetime.now().strftime("%H:%M:%S")
         self.log_view.append(
-            f'<span style="color:{clr};font-family:Consolas,monospace;font-size:12px;">'
+            f'<span style="color:{clr};font-family:Consolas,monospace;font-size:{Z(12)}px;">'
             f'[{ts}] {msg}</span>')
         self.log_view.moveCursor(QTextCursor.MoveOperation.End)
-        self._trim_log(self.log_view, 5000)
+        # Auto-trim every 500 appends instead of every single one
+        self._log_append_count = getattr(self, '_log_append_count', 0) + 1
+        if self._log_append_count >= 500:
+            self._trim_log(self.log_view, 3000)
+            self._log_append_count = 0
 
     def _on_stats(self, s):
         self.stat_clips.setText(str(s.get('clips', 0)))
@@ -5132,14 +6319,14 @@ class MainWindow(QMainWindow):
         self.lbl_m3u8_hdr.setText(f"M3U8: {s.get('m3u8',0)}")
 
     def _on_status(self, status):
-        c = {'running':'#f9e2af','stopped':'#6c7086','challenge':'#f38ba8'}.get(status,'#6c7086')
+        c = {'running':C('warning'),'stopped':C('text_muted'),'challenge':C('error')}.get(status,C('text_muted'))
         l = {'running':'Running','stopped':'Idle','challenge':'Challenge'}.get(status,'Idle')
         self._set_status(l, c)
 
     def _set_status(self, text, color):
         self.lbl_status_hdr.setText(f"● {text}")
         self.lbl_status_hdr.setStyleSheet(
-            f"font-size:12px; font-weight:600; background:transparent; color:{color};")
+            f"font-size:{Z(12)}px; font-weight:600; background:transparent; color:{color};")
 
     def _update_stats(self):
         try:
@@ -5183,21 +6370,24 @@ class MainWindow(QMainWindow):
                     if coll: collection_id = coll['id']
                 except Exception: pass
 
+        # Sort override (from catalog sort dropdown)
+        sort_by = ''
+        if hasattr(self, 'combo_sort'):
+            sort_by = self.combo_sort.currentData() or ''
+
         # Run DB query in background to keep GUI responsive
         def _query():
             rows = self.db.search_assets(
                 query=query, filters=filters, mode=mode,
                 favorites_only=favorites_only, downloaded_only=downloaded_only,
                 duration_range=duration_range, collection_id=collection_id,
-                min_rating=min_rating)
+                min_rating=min_rating, sort_by=sort_by)
             # Convert sqlite3.Row to plain dicts for thread-safe GUI consumption
             return DB._rows_to_dicts(rows) or []
 
         def _on_results(rows):
             self._last_rows = rows
             self._populate_cards(rows)
-            n = len(rows)
-            self.lbl_result_count.setText(f"{n} clip{'s' if n!=1 else ''}")
             if not (self._thumb_worker and self._thumb_worker.isRunning()):
                 self._start_thumb_worker()
 
@@ -5300,38 +6490,47 @@ class MainWindow(QMainWindow):
             card.deleteLater()
         self._current_cards.clear()
         self._selected_card = None
+        self._selected_cards = []
+        self._last_click_idx = -1
         # Remove old "Load More" button if present
-        if hasattr(self, '_load_more_btn') and self._load_more_btn:
-            self._card_flow.removeWidget(self._load_more_btn)
-            self._load_more_btn.setParent(None)
-            self._load_more_btn.deleteLater()
-            self._load_more_btn = None
+        self._safe_remove_load_more()
 
         self._card_rows_all = list(rows)
         self._card_show_count = 0
-        self._append_cards(200)
+        initial = 400 if getattr(self, '_catalog_mode', False) else 200
+        self._append_cards(initial)
 
     _CARD_PAGE_SIZE = 200
+
+    def _safe_remove_load_more(self):
+        """Safely remove the Load More button, handling deleted C++ objects."""
+        try:
+            btn = getattr(self, '_load_more_btn', None)
+            if btn is not None:
+                self._card_flow.removeWidget(btn)
+                btn.setParent(None)
+                btn.deleteLater()
+        except RuntimeError:
+            pass  # C++ object already deleted
+        self._load_more_btn = None
 
     def _append_cards(self, count):
         """Append the next `count` cards from _card_rows_all."""
         # Remove old Load More button before appending
-        if hasattr(self, '_load_more_btn') and self._load_more_btn:
-            self._card_flow.removeWidget(self._load_more_btn)
-            self._load_more_btn.setParent(None)
-            self._load_more_btn.deleteLater()
-            self._load_more_btn = None
+        self._safe_remove_load_more()
 
         size_idx = self.card_size_slider.value() if hasattr(self, 'card_size_slider') else 1
         thumb_dir = self._thumb_dir()
         start = self._card_show_count
         end = min(start + count, len(self._card_rows_all))
+        new_cards = []
         for row in self._card_rows_all[start:end]:
             card = ClipCard(row, size_idx=size_idx, thumb_dir=thumb_dir)
             card.tag_clicked.connect(self._on_tag_clicked)
             card.mousePressEvent = lambda e, r=row, c=card: self._on_card_press(e, r, c)
             self._card_flow.addWidget(card)
             self._current_cards.append(card)
+            new_cards.append(card)
         self._card_show_count = end
 
         # Add "Load More" button if there are remaining cards
@@ -5339,7 +6538,7 @@ class MainWindow(QMainWindow):
         if remaining > 0:
             btn = QPushButton(f"Load {min(remaining, self._CARD_PAGE_SIZE)} more  ({remaining} remaining)")
             btn.setObjectName("neutral")
-            btn.setFixedHeight(36); btn.setFixedWidth(300)
+            btn.setFixedHeight(Z(36)); btn.setFixedWidth(Z(300))
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.clicked.connect(lambda: self._append_cards(self._CARD_PAGE_SIZE))
             self._card_flow.addWidget(btn)
@@ -5349,10 +6548,25 @@ class MainWindow(QMainWindow):
 
         # Force layout recalc
         self._card_container.adjustSize()
-        n = len(self._card_rows_all)
-        shown = self._card_show_count
-        suffix = f" (showing {shown})" if shown < n else ""
-        self.lbl_result_count.setText(f"{n} clip{'s' if n!=1 else ''}{suffix}")
+        self._update_selection_label()
+
+        # Deferred batch thumbnail loading — prevents UI freeze on large card sets
+        self._deferred_thumb_load(new_cards)
+
+    _THUMB_BATCH_SIZE = 30
+
+    def _deferred_thumb_load(self, cards, idx=0):
+        """Load thumbnails in batches of _THUMB_BATCH_SIZE to keep UI responsive."""
+        if idx >= len(cards):
+            return
+        batch_end = min(idx + self._THUMB_BATCH_SIZE, len(cards))
+        for i in range(idx, batch_end):
+            try:
+                cards[i].load_deferred_thumb()
+            except RuntimeError:
+                pass  # widget deleted
+        # Schedule next batch
+        QTimer.singleShot(0, lambda: self._deferred_thumb_load(cards, batch_end))
 
     def _thumb_dir(self):
         base = self.inp_output.text().strip() if hasattr(self, 'inp_output') else ''
@@ -5388,6 +6602,51 @@ class MainWindow(QMainWindow):
         self.btn_fetch_thumbs.setEnabled(True)
         self.status_bar.showMessage("Thumbnails ready.", 3000)
 
+    # ── Local Folder Import ────────────────────────────────────────────────
+
+    def _import_folder(self):
+        """Open folder picker and import all video files into the database."""
+        # Default to the download dir if set
+        start_dir = ''
+        if hasattr(self, 'inp_dl_dir') and self.inp_dl_dir.text().strip():
+            start_dir = self.inp_dl_dir.text().strip()
+        elif hasattr(self, 'inp_output') and self.inp_output.text().strip():
+            start_dir = self.inp_output.text().strip()
+
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Video Folder to Import", start_dir)
+        if not folder:
+            return
+
+        if hasattr(self, '_import_worker') and self._import_worker and self._import_worker.isRunning():
+            self._toast("Import already running", 'warning', 2000)
+            return
+
+        self.btn_import_folder.setEnabled(False)
+        self.btn_import_folder.setText("Importing...")
+        self.lbl_import_status.setText("Scanning...")
+
+        self._import_worker = ImportWorker(
+            folder, self.db, self._thumb_dir(), recursive=True)
+        self._import_worker.log_signal.connect(
+            lambda msg: self.lbl_import_status.setText(msg))
+        self._import_worker.progress_signal.connect(
+            lambda cur, total: self.lbl_import_status.setText(f"Importing {cur}/{total}..."))
+        self._import_worker.finished.connect(self._on_import_done)
+        self._import_worker.start()
+
+    def _on_import_done(self, count):
+        self.btn_import_folder.setEnabled(True)
+        self.btn_import_folder.setText("Import Folder")
+        self.lbl_import_status.setText(f"Imported {count} clips")
+        if count > 0:
+            self._do_search()
+            self._refresh_filter_dropdowns()
+            self._update_stats()
+            self._toast(f"Imported {count} video clips", 'success', 4000)
+        else:
+            self._toast("No new videos found to import", 'info', 3000)
+
     def _refresh_filter_dropdowns(self):
         for attr, col in self._filter_map.items():
             cb = getattr(self, attr); cur = cb.currentText()
@@ -5409,6 +6668,9 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'btn_search_mode'):
             self.btn_search_mode.setChecked(False)
             self.btn_search_mode.setText("OR")
+        # Reset sort to Newest in catalog mode
+        if getattr(self, '_catalog_mode', False) and hasattr(self, 'combo_sort'):
+            self.combo_sort.setCurrentIndex(0)
         self._do_search()
 
     # ── Export ──────────────────────────────────────────────────────────────
@@ -5420,13 +6682,15 @@ class MainWindow(QMainWindow):
 
     def _ts(self): return datetime.now().strftime('%Y%m%d-%H%M%S')
 
-    def _export_txt(self):
-        self.lbl_export_status.setText("Exporting TXT...")
+    def _export_txt(self, filtered=False):
+        tag = "filtered " if filtered else ""
+        self.lbl_export_status.setText(f"Exporting {tag}TXT...")
+        rows_snapshot = self._get_export_rows(filtered)
         def _run():
-            rows = self.db.all_clips()
-            urls = [r['m3u8_url'] for r in rows if r['m3u8_url']]
+            urls = [r['m3u8_url'] if hasattr(r, '__getitem__') else r.get('m3u8_url','') for r in rows_snapshot]
+            urls = [u for u in urls if u]
             if not urls: return "No video URL data."
-            f = os.path.join(self._out_dir(), f"video-urls-{self._ts()}.txt")
+            f = os.path.join(self._out_dir(), f"video-urls-{tag.strip()}-{self._ts()}.txt" if filtered else f"video-urls-{self._ts()}.txt")
             with open(f,'w') as fh: fh.write('\n'.join(urls)+'\n')
             return f"Saved {len(urls)} URLs  ->  {f}"
         w = BackgroundWorker(_run)
@@ -5436,16 +6700,18 @@ class MainWindow(QMainWindow):
         w.finished.connect(lambda: self._bg_workers.remove(w) if w in self._bg_workers else None)
         w.start()
 
-    def _export_json(self):
-        self.lbl_export_status.setText("Exporting JSON...")
+    def _export_json(self, filtered=False):
+        tag = "filtered " if filtered else ""
+        self.lbl_export_status.setText(f"Exporting {tag}JSON...")
+        rows_snapshot = self._get_export_rows(filtered)
         def _run():
-            rows = self.db.all_clips()
-            if not rows: return "No data."
-            f = os.path.join(self._out_dir(), f"video-metadata-{self._ts()}.json")
+            if not rows_snapshot: return "No data."
+            fname = f"video-metadata-filtered-{self._ts()}.json" if filtered else f"video-metadata-{self._ts()}.json"
+            f = os.path.join(self._out_dir(), fname)
             with open(f,'w') as fh:
-                json.dump({'exported':datetime.now().isoformat(),'total':len(rows),
-                           'clips':[dict(r) for r in rows]}, fh, indent=2)
-            return f"Saved {len(rows)} clips  ->  {f}"
+                json.dump({'exported':datetime.now().isoformat(),'total':len(rows_snapshot),
+                           'clips':[dict(r) if isinstance(r, dict) else dict(zip(r.keys(), tuple(r))) for r in rows_snapshot]}, fh, indent=2)
+            return f"Saved {len(rows_snapshot)} clips  ->  {f}"
         w = BackgroundWorker(_run)
         w.result_signal.connect(lambda msg: self.lbl_export_status.setText(msg))
         w.error_signal.connect(lambda e: self.lbl_export_status.setText(f"Export error: {e}"))
@@ -5453,21 +6719,23 @@ class MainWindow(QMainWindow):
         w.finished.connect(lambda: self._bg_workers.remove(w) if w in self._bg_workers else None)
         w.start()
 
-    def _export_m3u(self):
-        self.lbl_export_status.setText("Exporting M3U...")
+    def _export_m3u(self, filtered=False):
+        tag = "filtered " if filtered else ""
+        self.lbl_export_status.setText(f"Exporting {tag}M3U...")
+        rows_snapshot = self._get_export_rows(filtered)
         def _run():
-            rows = self.db.all_clips()
             lines = ['#EXTM3U']
-            for r in rows:
-                keys = r.keys()
+            for r in rows_snapshot:
+                keys = r.keys() if hasattr(r, 'keys') else r
                 local_p = str(r['local_path'] if 'local_path' in keys and r['local_path'] else '')
                 m3u8    = str(r['m3u8_url']   if 'm3u8_url'   in keys and r['m3u8_url']   else '')
-                title   = str(r['title'] if 'title' in keys and r['title'] else r['clip_id'] or 'Video Clip')
+                title   = str(r['title'] if 'title' in keys and r['title'] else r.get('clip_id', '') if isinstance(r, dict) else r['clip_id'] or 'Video Clip')
                 url = local_p if (local_p and os.path.isfile(local_p)) else m3u8
                 if url:
                     lines += [f"#EXTINF:-1,{title}", url]
             if len(lines) == 1: return "No video URL data."
-            f = os.path.join(self._out_dir(), f"video-playlist-{self._ts()}.m3u")
+            fname = f"video-playlist-filtered-{self._ts()}.m3u" if filtered else f"video-playlist-{self._ts()}.m3u"
+            f = os.path.join(self._out_dir(), fname)
             with open(f,'w') as fh: fh.write('\n'.join(lines)+'\n')
             return f"Saved  ->  {f}"
         w = BackgroundWorker(_run)
@@ -5477,20 +6745,24 @@ class MainWindow(QMainWindow):
         w.finished.connect(lambda: self._bg_workers.remove(w) if w in self._bg_workers else None)
         w.start()
 
-    def _export_csv(self):
-        self.lbl_export_status.setText("Exporting CSV...")
+    def _export_csv(self, filtered=False):
+        tag = "filtered " if filtered else ""
+        self.lbl_export_status.setText(f"Exporting {tag}CSV...")
+        rows_snapshot = self._get_export_rows(filtered)
         def _run():
             import csv
-            rows = self.db.all_clips()
-            if not rows: return "No data."
-            f = os.path.join(self._out_dir(), f"video-metadata-{self._ts()}.csv")
+            if not rows_snapshot: return "No data."
+            fname = f"video-metadata-filtered-{self._ts()}.csv" if filtered else f"video-metadata-{self._ts()}.csv"
+            f = os.path.join(self._out_dir(), fname)
             fields = ['clip_id','title','creator','collection','tags','resolution',
                       'duration','frame_rate','camera','formats','m3u8_url','source_url','found_at']
             with open(f,'w',newline='',encoding='utf-8') as fh:
                 wr = csv.DictWriter(fh, fieldnames=fields, extrasaction='ignore')
                 wr.writeheader()
-                for r in rows: wr.writerow({k: (r[k] if k in r.keys() else '') for k in fields})
-            return f"Saved {len(rows)} rows  ->  {f}"
+                for r in rows_snapshot:
+                    rd = r if isinstance(r, dict) else dict(zip(r.keys(), tuple(r)))
+                    wr.writerow({k: rd.get(k, '') for k in fields})
+            return f"Saved {len(rows_snapshot)} rows  ->  {f}"
         w = BackgroundWorker(_run)
         w.result_signal.connect(lambda msg: self.lbl_export_status.setText(msg))
         w.error_signal.connect(lambda e: self.lbl_export_status.setText(f"Export error: {e}"))
@@ -5676,7 +6948,7 @@ class MainWindow(QMainWindow):
         self._dl_clip_rows[cid] = r
         self.dl_table.setItem(r, 0, QTableWidgetItem(str(clip.get('title', '') or cid)))
         si = QTableWidgetItem("Queued")
-        si.setForeground(QColor('#6c7086')); self.dl_table.setItem(r, 1, si)
+        si.setForeground(QColor(C('text_muted'))); self.dl_table.setItem(r, 1, si)
         self.dl_table.setItem(r, 2, QTableWidgetItem(""))
         self.dl_table.setItem(r, 3, QTableWidgetItem(""))
 
@@ -5732,9 +7004,9 @@ class MainWindow(QMainWindow):
         if self._dl_worker: self._dl_worker.stop()
 
     def _on_dl_log(self, msg, level):
-        clr = {'OK':'#a6e3a1','ERROR':'#f38ba8','WARN':'#f9e2af'}.get(level,'#cdd6f4')
+        clr = {'OK':C('success'),'ERROR':C('error'),'WARN':C('warning')}.get(level,C('text'))
         self.dl_log.append(
-            f'<span style="color:{clr};font-family:Consolas;font-size:11px;">'
+            f'<span style="color:{clr};font-family:Consolas;font-size:{Z(11)}px;">'
             f'[{datetime.now().strftime("%H:%M:%S")}] {msg}</span>')
         self.dl_log.moveCursor(QTextCursor.MoveOperation.End)
         self._trim_log(self.dl_log, 2000)
@@ -5770,10 +7042,10 @@ class MainWindow(QMainWindow):
             si = self.dl_table.item(r, 1)
             if si:
                 si.setText("Downloading")
-                si.setForeground(QColor('#f9e2af'))
+                si.setForeground(QColor(C('warning')))
             else:
                 si = QTableWidgetItem("Downloading")
-                si.setForeground(QColor('#f9e2af'))
+                si.setForeground(QColor(C('warning')))
                 self.dl_table.setItem(r, 1, si)
             pi = self.dl_table.item(r, 2)
             if pi:
@@ -5790,16 +7062,16 @@ class MainWindow(QMainWindow):
             r = self._dl_clip_rows[clip_id]
             if success:
                 si = QTableWidgetItem("Done")
-                si.setForeground(QColor('#a6e3a1'))
+                si.setForeground(QColor(C('success')))
                 self.dl_table.setItem(r, 1, si)
                 fi = QTableWidgetItem(os.path.basename(path_or_err))
-                fi.setForeground(QColor('#89b4fa'))
+                fi.setForeground(QColor(C('accent')))
                 fi.setData(_LOCAL_PATH_ROLE, path_or_err)  # store full path
                 self.dl_table.setItem(r, 3, fi)
                 self.dl_table.setItem(r, 2, QTableWidgetItem("100%"))
             else:
                 si = QTableWidgetItem("Error")
-                si.setForeground(QColor('#f38ba8'))
+                si.setForeground(QColor(C('error')))
                 self.dl_table.setItem(r, 1, si)
                 self.dl_table.setItem(r, 3, QTableWidgetItem(path_or_err[:60]))
         self._update_dl_stats()
@@ -5915,6 +7187,15 @@ class MainWindow(QMainWindow):
         if cfg.get('clipboard_monitor', False) and hasattr(self, '_clipboard_timer'):
             if not self._clipboard_timer.isActive():
                 self._clipboard_timer.start(2000)
+        # UI zoom (just sync combo — don't trigger rebuild during config load)
+        if 'ui_zoom' in cfg and hasattr(self, '_zoom_combo'):
+            zoom_val = cfg['ui_zoom']
+            for i in range(self._zoom_combo.count()):
+                if abs(self._zoom_combo.itemData(i) - zoom_val) < 0.01:
+                    self._zoom_combo.blockSignals(True)
+                    self._zoom_combo.setCurrentIndex(i)
+                    self._zoom_combo.blockSignals(False)
+                    break
 
     def _browse_output(self):
         d = QFileDialog.getExistingDirectory(self,"Select Output Dir",self.inp_output.text())
@@ -5967,7 +7248,7 @@ class MainWindow(QMainWindow):
             event.ignore()
             self.hide()
             self._tray.showMessage(
-                "Artlist Scraper", "Still running in background.",
+                "Video Scraper", "Still running in background.",
                 QSystemTrayIcon.MessageIcon.Information, 2000)
             return
         # Stop timers FIRST so they can't fire against a closed DB
@@ -5985,6 +7266,8 @@ class MainWindow(QMainWindow):
             self._dl_worker.stop(); self._dl_worker.wait(5000)
         if self._thumb_worker and self._thumb_worker.isRunning():
             self._thumb_worker.stop(); self._thumb_worker.wait(3000)
+        if hasattr(self, '_import_worker') and self._import_worker and self._import_worker.isRunning():
+            self._import_worker.stop(); self._import_worker.wait(3000)
         if hasattr(self, '_tray') and self._tray:
             self._tray.hide()
         if self.db: self.db.close()
@@ -6000,12 +7283,36 @@ if __name__ == '__main__':
     # High-DPI: environment hints BEFORE QApplication
     os.environ.setdefault('QT_AUTO_SCREEN_SCALE_FACTOR', '1')
     os.environ.setdefault('QT_ENABLE_HIGHDPI_SCALING', '1')
+    # Suppress noisy Qt warnings (font point-size, multimedia info)
+    os.environ.setdefault('QT_LOGGING_RULES', 'qt.multimedia.ffmpeg.warning=false;qt.qpa.fonts.warning=false')
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.RoundPreferFloor)
     app = QApplication(sys.argv)
     _init_dpi()
-    app.setStyleSheet(DARK_STYLE)
-    app.setApplicationName("Artlist M3U8 Scraper")
+
+    # Set default app font to prevent QFont::setPointSize(-1) warnings
+    _app_font = app.font()
+    _app_font.setPixelSize(max(1, int(13 * _dpi_factor)))
+    app.setFont(_app_font)
+
+    # Load saved zoom and theme from config BEFORE building UI so Z() and C() are correct
+    _startup_cfg = load_config()
+    _startup_zoom = _startup_cfg.get('ui_zoom', 1.0)
+    _startup_theme = _startup_cfg.get('theme', 'OLED')
+    _ui_scale = _startup_zoom
+    _set_theme(_startup_theme)
+
+    # Scale ClipCard sizes for saved zoom
+    _sf = _startup_zoom * _dpi_factor
+    ClipCard.SIZES = [
+        (int(160 * _sf), int(90 * _sf)),
+        (int(200 * _sf), int(112 * _sf)),
+        (int(240 * _sf), int(135 * _sf)),
+        (int(320 * _sf), int(180 * _sf)),
+    ]
+
+    app.setStyleSheet(_build_stylesheet(_startup_zoom, _startup_theme))
+    app.setApplicationName("Video Scraper")
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
