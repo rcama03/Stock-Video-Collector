@@ -1,4 +1,4 @@
-# Video Scraper v1.1.0
+# Video Scraper v1.4.0
 # Headless crawler with PyQt6 GUI — full metadata + keyword search + download manager
 # Phase 1-3: Search quality, thumbnail pipeline, card/grid view
 # Phase 4-6: Detail panel, archive management, collections, stats, filename templates
@@ -1551,6 +1551,8 @@ class SiteProfile:
         self.load_more_clicks   = kw.get('load_more_clicks', 0)
         # Video URL domain filter (e.g. 'videos.pexels.com') — only record URLs from this domain
         self.video_cdn_domain   = kw.get('video_cdn_domain', '')
+        # Catalog card extraction: JS that returns [{clip_id, title, creator, duration, thumbnail_url, source_url}]
+        self.catalog_card_js    = kw.get('catalog_card_js', '')
 
     def is_allowed_domain(self, domain):
         if not self.domains:
@@ -1659,6 +1661,144 @@ SiteProfile.register(SiteProfile(
         'tags':       r'Tags\s*\n((?:.+\n?){1,25}?)(?:Related|Part of|Clip by|Similar|Explore|$)',
     },
     og_fallback=True,
+    catalog_card_js="""
+    (() => {
+        const clips = [];
+        const seen = new Set();
+
+        // ── Strategy 1: __NEXT_DATA__ (Next.js server-side props) ──
+        try {
+            const nd = document.getElementById('__NEXT_DATA__');
+            if (nd) {
+                const data = JSON.parse(nd.textContent);
+                const walk = (obj) => {
+                    if (!obj || typeof obj !== 'object') return;
+                    if (Array.isArray(obj)) { obj.forEach(walk); return; }
+                    // Look for clip-like objects with numeric IDs
+                    const id = String(obj.id || obj.clipId || obj.clip_id || '');
+                    if (id && /^\\d{4,}$/.test(id) && !seen.has(id)) {
+                        seen.add(id);
+                        clips.push({
+                            clip_id: id,
+                            title: obj.title || obj.name || obj.clipTitle || '',
+                            creator: obj.artistName || obj.artist?.name || obj.creatorName || obj.creator || '',
+                            duration: obj.duration || obj.length || '',
+                            thumbnail_url: obj.thumbnailUrl || obj.thumbnail || obj.imageUrl || obj.image?.url || obj.posterUrl || '',
+                            resolution: obj.resolution || '',
+                            tags: Array.isArray(obj.tags) ? obj.tags.map(t => typeof t === 'string' ? t : t.name || '').join(', ') : (obj.tags || ''),
+                            collection: obj.collectionName || obj.collection?.name || obj.folderName || '',
+                            source_url: obj.url || obj.pageUrl || (id ? '/stock-footage/clip/' + id : ''),
+                            m3u8_url: obj.videoUrl || obj.hlsUrl || obj.m3u8Url || obj.previewUrl || '',
+                            frame_rate: obj.fps || obj.frameRate || '',
+                            camera: obj.camera || obj.cameraModel || '',
+                            formats: obj.formats || '',
+                        });
+                    }
+                    Object.values(obj).forEach(walk);
+                };
+                walk(data);
+            }
+        } catch(e) {}
+
+        // ── Strategy 2: DOM card parsing ──
+        // Artlist cards: <a href="/stock-footage/..."> wrapping img + text
+        try {
+            const cards = document.querySelectorAll('a[href*="/stock-footage/"][href$="/"]' +
+                ', a[href*="/stock-footage/"][href*="/"]');
+            cards.forEach(card => {
+                const href = card.href || card.getAttribute('href') || '';
+                const idM = href.match(/\\/(\\d{4,})\\/?$/);
+                if (!idM) return;
+                const id = idM[1];
+                if (seen.has(id)) return;
+                seen.add(id);
+
+                // Find thumbnail
+                const img = card.querySelector('img[src], img[data-src], img[srcset]');
+                let thumb = '';
+                if (img) {
+                    thumb = img.src || img.dataset.src || '';
+                    if (!thumb && img.srcset) {
+                        const parts = img.srcset.split(',').map(s => s.trim().split(' ')[0]);
+                        thumb = parts[parts.length - 1] || '';
+                    }
+                }
+                // Also check picture > source
+                if (!thumb) {
+                    const source = card.querySelector('picture source[srcset]');
+                    if (source) {
+                        const parts = source.srcset.split(',').map(s => s.trim().split(' ')[0]);
+                        thumb = parts[parts.length - 1] || '';
+                    }
+                }
+                // Background image fallback
+                if (!thumb) {
+                    const bgEl = card.querySelector('[style*="background-image"]');
+                    if (bgEl) {
+                        const bgM = bgEl.style.backgroundImage.match(/url\\(['"]?([^'"\\)]+)/);
+                        if (bgM) thumb = bgM[1];
+                    }
+                }
+
+                // Find text content
+                const allText = card.innerText || '';
+                const lines = allText.split('\\n').map(l => l.trim()).filter(l => l);
+
+                // Duration: look for MM:SS or H:MM:SS pattern
+                let duration = '';
+                const durEl = card.querySelector('[class*="uration"], [class*="time"], [class*="length"]');
+                if (durEl) duration = durEl.innerText.trim();
+                if (!duration) {
+                    for (const l of lines) {
+                        if (/^\\d{1,2}:\\d{2}(:\\d{2})?$/.test(l)) { duration = l; break; }
+                    }
+                }
+
+                // Title: first substantial text line that isn't duration
+                let title = '';
+                for (const l of lines) {
+                    if (l === duration) continue;
+                    if (l.length > 3 && l.length < 200 && !/^\\d{1,2}:\\d{2}/.test(l)) {
+                        title = l; break;
+                    }
+                }
+
+                // Creator: second text line or element with "by" prefix
+                let creator = '';
+                const byEl = card.querySelector('[class*="rtist"], [class*="reator"], [class*="author"]');
+                if (byEl) creator = byEl.innerText.trim().replace(/^by\\s+/i, '');
+
+                clips.push({
+                    clip_id: id, title, creator, duration, thumbnail_url: thumb,
+                    source_url: href.startsWith('http') ? href : location.origin + href,
+                    resolution: '', tags: '', collection: '', m3u8_url: '',
+                    frame_rate: '', camera: '', formats: '',
+                });
+            });
+        } catch(e) {}
+
+        // ── Strategy 3: video elements with poster attributes ──
+        try {
+            document.querySelectorAll('video[poster]').forEach(v => {
+                const poster = v.poster || '';
+                const link = v.closest('a[href*="/stock-footage/"]');
+                if (!link) return;
+                const idM = link.href.match(/\\/(\\d{4,})\\/?$/);
+                if (!idM || seen.has(idM[1])) return;
+                seen.add(idM[1]);
+                clips.push({
+                    clip_id: idM[1], title: '', creator: '', duration: '',
+                    thumbnail_url: poster,
+                    source_url: link.href.startsWith('http') ? link.href : location.origin + link.href,
+                    resolution: '', tags: '', collection: '', m3u8_url: '',
+                    frame_rate: '', camera: '', formats: '',
+                });
+            });
+        } catch(e) {}
+
+        return clips;
+    })()
+    """,
 ))
 
 SiteProfile.register(SiteProfile(
@@ -1995,18 +2135,43 @@ class CrawlerWorker(QThread):
 
             page = context.pages[0] if context.pages else await context.new_page()
 
-            # ── Seed all active profiles ──────────────────────────────────
-            for _prof in self._profiles:
-                if len(self._profiles) == 1:
-                    _start = self._normalize_url(
-                        self.cfg.get('start_url', '') or _prof.start_url)
-                else:
-                    _start = self._normalize_url(_prof.start_url)
-                if _start:
-                    self.db.execute("DELETE FROM crawled_pages WHERE url=?", (_start,))
-                    self.db.conn.commit()
-                    self.db.enqueue(_start, 0, 100, profile=_prof.name)
-                    self.log(f"Seeded [{_prof.name}]: {_start}", "INFO")
+            crawl_mode = self.cfg.get('crawl_mode', 'full')
+            self.log(f"Crawl mode: {crawl_mode}", "INFO")
+
+            # ── Seed based on mode ────────────────────────────────────────
+            if crawl_mode == 'm3u8_only':
+                # Seed from DB: clips that have metadata but no M3U8 URL
+                missing = self.db.execute("""
+                    SELECT clip_id, source_url FROM clips
+                    WHERE (m3u8_url IS NULL OR m3u8_url = '')
+                    AND source_url != '' AND clip_id != ''
+                    ORDER BY id DESC
+                """).fetchall()
+                seeded = 0
+                for row in missing:
+                    src_url = row['source_url']
+                    if src_url and src_url.startswith('http'):
+                        # Determine which profile this clip belongs to
+                        prof_name = 'Artlist'  # default
+                        for _p in self._profiles:
+                            if any(d in src_url for d in _p.domains):
+                                prof_name = _p.name; break
+                        self.db.enqueue(src_url, 0, 10, profile=prof_name)
+                        seeded += 1
+                self.log(f"M3U8 Harvest: seeded {seeded} clips missing M3U8 URLs", "OK")
+            else:
+                # Normal seeding: start URLs from profiles
+                for _prof in self._profiles:
+                    if len(self._profiles) == 1:
+                        _start = self._normalize_url(
+                            self.cfg.get('start_url', '') or _prof.start_url)
+                    else:
+                        _start = self._normalize_url(_prof.start_url)
+                    if _start:
+                        self.db.execute("DELETE FROM crawled_pages WHERE url=?", (_start,))
+                        self.db.conn.commit()
+                        self.db.enqueue(_start, 0, 100, profile=_prof.name)
+                        self.log(f"Seeded [{_prof.name}]: {_start}", "INFO")
 
             prof_names = ', '.join(p.name for p in self._profiles)
             self.log(f"Profiles: {prof_names}  |  Batch: {self._batch_size} pages each", "INFO")
@@ -2067,15 +2232,38 @@ class CrawlerWorker(QThread):
 
                         is_clip = self._is_clip(url)
                         is_cat = self._is_catalog(url)
-                        page_type = 'CLIP' if is_clip else ('CATALOG' if is_cat else 'GENERIC')
-                        self.log(f"[{pname}] DEQUEUE [{page_type}] d{depth} p{page_count} {url[:80]}", "INFO")
 
-                        if is_clip:
-                            await self._crawl_clip(context, url, depth)
-                        elif is_cat:
-                            await self._crawl_catalog(page, url, depth)
+                        # ── Crawl Mode dispatch ──────────────────────────
+                        if crawl_mode == 'catalog_sweep':
+                            if is_clip:
+                                # Don't visit clip pages in catalog sweep mode
+                                # Just mark processed — metadata already extracted from cards
+                                self.db.mark_processed(url, depth)
+                                continue
+                            elif is_cat:
+                                self.log(f"[{pname}] CATALOG [d{depth}] p{page_count} {url[:80]}", "INFO")
+                                await self._crawl_catalog(page, url, depth)
+                            else:
+                                # Generic page — treat as catalog (might have cards)
+                                self.log(f"[{pname}] GENERIC->CATALOG [d{depth}] p{page_count} {url[:80]}", "INFO")
+                                await self._crawl_catalog(page, url, depth)
+                        elif crawl_mode == 'm3u8_only':
+                            if is_clip or not is_cat:
+                                self.log(f"[{pname}] M3U8 HARVEST [d{depth}] p{page_count} {url[:80]}", "INFO")
+                                await self._crawl_clip(context, url, depth)
+                            else:
+                                self.db.mark_processed(url, depth)
+                                continue
                         else:
-                            await self._crawl_clip(context, url, depth)
+                            # Full mode — original behavior
+                            page_type = 'CLIP' if is_clip else ('CATALOG' if is_cat else 'GENERIC')
+                            self.log(f"[{pname}] DEQUEUE [{page_type}] d{depth} p{page_count} {url[:80]}", "INFO")
+                            if is_clip:
+                                await self._crawl_clip(context, url, depth)
+                            elif is_cat:
+                                await self._crawl_catalog(page, url, depth)
+                            else:
+                                await self._crawl_clip(context, url, depth)
 
                         if await self._detect_challenge(page):
                             solved = await self._handle_challenge(page, None, pw)
@@ -2443,6 +2631,14 @@ class CrawlerWorker(QThread):
         self.log(f"CATALOG [d{depth}] {url}", "INFO")
 
         try:
+            # ── Hook API response interception for bulk clip data ──────
+            async def _cat_resp_handler(resp):
+                try:
+                    await self._on_catalog_response(resp, url)
+                except Exception:
+                    pass
+            page.on('response', _cat_resp_handler)
+
             if not await self._safe_goto(page, url):
                 self.db.mark_failed(url, depth); return
 
@@ -2473,6 +2669,40 @@ class CrawlerWorker(QThread):
 
             await self._scroll_to_bottom(page)
 
+            # ── Bulk metadata extraction from card grid ───────────────────
+            card_count = await self._extract_catalog_cards(page, url)
+
+            # ── Infinite scroll loop for catalog sweep ────────────────────
+            # Keep scrolling + extracting until no new cards appear
+            crawl_mode = self.cfg.get('crawl_mode', 'full')
+            if crawl_mode == 'catalog_sweep':
+                max_scroll_rounds = 50  # safety cap
+                for scroll_round in range(max_scroll_rounds):
+                    if self._stop.is_set():
+                        break
+                    # Get current page height
+                    prev_height = await page.evaluate("document.body.scrollHeight")
+                    # Scroll to bottom with randomized behavior
+                    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    await asyncio.sleep(random.uniform(1.5, 3.0))
+                    new_height = await page.evaluate("document.body.scrollHeight")
+                    if new_height <= prev_height:
+                        # No new content loaded — try one more time
+                        await asyncio.sleep(2.0)
+                        new_height = await page.evaluate("document.body.scrollHeight")
+                        if new_height <= prev_height:
+                            self.log(f"  [scroll] No more content after {scroll_round+1} rounds", "INFO")
+                            break
+                    # Extract any newly loaded cards
+                    new_cards = await self._extract_catalog_cards(page, url)
+                    card_count += new_cards
+                    self.log(
+                        f"  [scroll] Round {scroll_round+1}: +{new_cards} cards (total: {card_count})",
+                        "INFO" if new_cards else "DEBUG")
+                    if new_cards == 0:
+                        # No new cards even though page grew — might be footer/ads
+                        break
+
             # ── Extract video MP4s directly from catalog page ─────────────
             # Pexels embeds SD MP4 URLs in <video src="..."> on catalog pages
             await self._extract_catalog_videos(page, url)
@@ -2493,8 +2723,16 @@ class CrawlerWorker(QThread):
                     if not (resume and self.db.is_processed(norm)):
                         self.db.enqueue(norm, depth+1, 5, profile=self.profile.name)
 
+            # Unhook catalog response handler
+            try:
+                page.remove_listener('response', _cat_resp_handler)
+            except Exception:
+                pass
+
             self.db.mark_processed(url, depth)
-            self.log(f"CATALOG done — {queued} items queued  (depth {depth})", "OK")
+            self.log(
+                f"CATALOG done — {card_count} cards extracted, {queued} items queued  (depth {depth})",
+                "OK")
         except Exception as e:
             self.log(f"CATALOG error: {e}", "ERROR")
             self.db.mark_failed(url, depth)
@@ -2556,6 +2794,266 @@ class CrawlerWorker(QThread):
             self.log(f"  [catalog-extract] {count} new / {total} total videos", "OK" if count else "INFO")
         except Exception as e:
             self.log(f"  [catalog-extract] Error: {e}", "WARN")
+
+    # ── Bulk catalog card metadata extraction ─────────────────────────────
+
+    async def _extract_catalog_cards(self, page, source_url):
+        """
+        Bulk-extract clip metadata from catalog page cards.
+        Uses profile's catalog_card_js (if set) or generic card parsing.
+        Returns count of new/updated clips.
+        """
+        new_count = 0
+        updated_count = 0
+
+        # ── Strategy 1: Profile-specific JS card extractor ────────────
+        cards = []
+        if self.profile.catalog_card_js:
+            try:
+                cards = await page.evaluate(self.profile.catalog_card_js) or []
+                self.log(f"  [catalog-cards] Profile JS extracted {len(cards)} cards", "INFO")
+            except Exception as e:
+                self.log(f"  [catalog-cards] Profile JS error: {str(e)[:80]}", "WARN")
+
+        # ── Strategy 2: Generic — intercept __NEXT_DATA__ ─────────────
+        if not cards:
+            try:
+                cards = await page.evaluate("""
+                    (() => {
+                        const clips = [];
+                        const seen = new Set();
+                        // Try __NEXT_DATA__
+                        const nd = document.getElementById('__NEXT_DATA__');
+                        if (nd) {
+                            const walk = (obj) => {
+                                if (!obj || typeof obj !== 'object') return;
+                                if (Array.isArray(obj)) { obj.forEach(walk); return; }
+                                const id = String(obj.id || obj.clipId || obj.clip_id || '');
+                                if (id && /^\\d{4,}$/.test(id) && !seen.has(id)) {
+                                    seen.add(id);
+                                    clips.push({
+                                        clip_id: id,
+                                        title: obj.title || obj.name || '',
+                                        creator: obj.artistName || obj.creatorName || '',
+                                        duration: obj.duration || '',
+                                        thumbnail_url: obj.thumbnailUrl || obj.thumbnail || obj.imageUrl || '',
+                                        source_url: obj.url || '',
+                                    });
+                                }
+                                Object.values(obj).forEach(walk);
+                            };
+                            try { walk(JSON.parse(nd.textContent)); } catch(e) {}
+                        }
+                        return clips;
+                    })()
+                """) or []
+                if cards:
+                    self.log(f"  [catalog-cards] __NEXT_DATA__ extracted {len(cards)} cards", "INFO")
+            except Exception:
+                pass
+
+        # ── Strategy 3: Generic DOM card parsing ──────────────────────
+        if not cards:
+            try:
+                cards = await page.evaluate("""
+                    (() => {
+                        const clips = [];
+                        const seen = new Set();
+                        // Find all links with numeric IDs in the path
+                        document.querySelectorAll('a[href]').forEach(a => {
+                            const href = a.href || '';
+                            const m = href.match(/\\/(\\d{4,})\\/?$/);
+                            if (!m || seen.has(m[1])) return;
+                            // Must have visual content (image or video)
+                            const img = a.querySelector('img[src], img[data-src], video[poster]');
+                            if (!img) return;
+                            seen.add(m[1]);
+                            let thumb = img.src || img.dataset.src || img.poster || '';
+                            clips.push({
+                                clip_id: m[1],
+                                title: (a.getAttribute('aria-label') || a.getAttribute('title') || img.alt || '').trim(),
+                                creator: '',
+                                duration: '',
+                                thumbnail_url: thumb,
+                                source_url: href.startsWith('http') ? href : location.origin + href,
+                            });
+                        });
+                        return clips;
+                    })()
+                """) or []
+                if cards:
+                    self.log(f"  [catalog-cards] Generic DOM extracted {len(cards)} cards", "INFO")
+            except Exception:
+                pass
+
+        if not cards:
+            self.log(f"  [catalog-cards] No cards extracted from catalog page", "DEBUG")
+            return 0
+
+        # ── Save extracted cards to DB ────────────────────────────────
+        thumb_dir = os.path.join(
+            os.environ.get('APPDATA', os.path.expanduser('~')),
+            'ArtlistScraper', 'thumbnails')
+        os.makedirs(thumb_dir, exist_ok=True)
+
+        for card in cards:
+            if self._stop.is_set():
+                break
+            clip_id = str(card.get('clip_id', '') or '').strip()
+            if not clip_id:
+                continue
+
+            meta = {k: '' for k in ('clip_id','source_url','title','creator','collection',
+                                     'resolution','duration','frame_rate','camera',
+                                     'formats','tags','thumbnail_url','m3u8_url','source_site')}
+            meta['clip_id'] = clip_id
+            meta['source_site'] = self.profile.name
+            # Fill in whatever the card extraction gave us
+            for field in ('title','creator','duration','thumbnail_url','source_url',
+                          'resolution','tags','collection','m3u8_url','frame_rate','camera','formats'):
+                v = str(card.get(field, '') or '').strip()
+                if v:
+                    meta[field] = v
+
+            # Ensure source_url is absolute
+            if meta['source_url'] and not meta['source_url'].startswith('http'):
+                base = urlparse(source_url)
+                meta['source_url'] = f"{base.scheme}://{base.netloc}{meta['source_url']}"
+
+            is_new = self.db.save_clip(meta)
+            if is_new:
+                new_count += 1
+            else:
+                # Backfill empty fields on existing record
+                self.db.update_metadata(clip_id, meta)
+                updated_count += 1
+
+            # Download thumbnail if we have a URL and no local thumb yet
+            thumb_url = meta.get('thumbnail_url', '')
+            if thumb_url:
+                thumb_path = os.path.join(thumb_dir, f"{clip_id}.jpg")
+                if not os.path.isfile(thumb_path) or os.path.getsize(thumb_path) == 0:
+                    self._download_thumb_url(thumb_url, thumb_path, clip_id)
+
+        self.log(
+            f"  [catalog-cards] Saved {new_count} new + {updated_count} updated clips "
+            f"({len(cards)} total cards)",
+            "OK" if new_count else "INFO")
+        self.stats_signal.emit(self.db.stats())
+        return new_count + updated_count
+
+    def _download_thumb_url(self, url, out_path, clip_id):
+        """Download a thumbnail URL to disk. Non-blocking (runs in crawl thread)."""
+        try:
+            import urllib.request
+            req = urllib.request.Request(url)
+            req.add_header('User-Agent', 'Mozilla/5.0')
+            resp = urllib.request.urlopen(req, timeout=10)
+            data = resp.read(2_000_000)  # cap at 2MB
+            resp.close()
+            if len(data) > 500:
+                with open(out_path, 'wb') as f:
+                    f.write(data)
+                self.db.update_thumb_path(clip_id, out_path)
+        except Exception:
+            pass  # Thumbnail download failure is non-critical
+
+    # ── Catalog API response interception ─────────────────────────────────
+
+    async def _on_catalog_response(self, response, source_url):
+        """Intercept JSON API responses on catalog pages for bulk clip data."""
+        try:
+            url = response.url
+            ct = response.headers.get('content-type', '')
+            if 'json' not in ct:
+                return
+            rt = response.request.resource_type
+            if rt not in ('xhr', 'fetch'):
+                return
+            # Only process reasonably-sized JSON (skip huge payloads)
+            cl = int(response.headers.get('content-length', '0') or 0)
+            if cl > 5_000_000 or cl == 0:
+                pass  # Unknown size, try anyway (but cap read)
+
+            body = await response.text()
+            if len(body) < 50 or len(body) > 5_000_000:
+                return
+
+            data = json.loads(body)
+
+            # Walk the JSON for clip-like objects
+            clips_found = 0
+            thumb_dir = os.path.join(
+                os.environ.get('APPDATA', os.path.expanduser('~')),
+                'ArtlistScraper', 'thumbnails')
+
+            def _walk(obj):
+                nonlocal clips_found
+                if isinstance(obj, list):
+                    for item in obj:
+                        _walk(item)
+                    return
+                if not isinstance(obj, dict):
+                    return
+                # Check if this looks like a clip object
+                cid = str(obj.get('id', '') or obj.get('clipId', '') or obj.get('clip_id', '') or '')
+                if cid and re.match(r'^\d{4,}$', cid):
+                    meta = {k: '' for k in ('clip_id','source_url','title','creator','collection',
+                                             'resolution','duration','frame_rate','camera',
+                                             'formats','tags','thumbnail_url','m3u8_url','source_site')}
+                    meta['clip_id'] = cid
+                    meta['source_site'] = self.profile.name
+                    meta['title'] = str(obj.get('title', '') or obj.get('name', '') or '')
+                    meta['creator'] = str(obj.get('artistName', '') or obj.get('artist', {}).get('name', '') if isinstance(obj.get('artist'), dict) else obj.get('artist', '') or obj.get('creatorName', '') or '')
+                    meta['duration'] = str(obj.get('duration', '') or obj.get('length', '') or '')
+                    meta['thumbnail_url'] = str(obj.get('thumbnailUrl', '') or obj.get('thumbnail', '') or obj.get('imageUrl', '') or obj.get('posterUrl', '') or '')
+                    meta['resolution'] = str(obj.get('resolution', '') or '')
+                    meta['frame_rate'] = str(obj.get('fps', '') or obj.get('frameRate', '') or '')
+                    meta['camera'] = str(obj.get('camera', '') or obj.get('cameraModel', '') or '')
+                    meta['collection'] = str(obj.get('collectionName', '') or '')
+
+                    # Tags
+                    tags = obj.get('tags', '')
+                    if isinstance(tags, list):
+                        tags = ', '.join(str(t.get('name', '') if isinstance(t, dict) else t) for t in tags[:25])
+                    meta['tags'] = str(tags or '')
+
+                    # Video URL
+                    for vk in ('videoUrl', 'hlsUrl', 'm3u8Url', 'previewUrl', 'contentUrl'):
+                        v = str(obj.get(vk, '') or '')
+                        if v and ('m3u8' in v or 'mp4' in v):
+                            meta['m3u8_url'] = v
+                            break
+
+                    # Source URL
+                    meta['source_url'] = str(obj.get('url', '') or obj.get('pageUrl', '') or '')
+
+                    is_new = self.db.save_clip(meta)
+                    if is_new:
+                        clips_found += 1
+                    else:
+                        self.db.update_metadata(cid, meta)
+
+                    # Download thumbnail
+                    if meta['thumbnail_url']:
+                        tp = os.path.join(thumb_dir, f"{cid}.jpg")
+                        if not os.path.isfile(tp):
+                            self._download_thumb_url(meta['thumbnail_url'], tp, cid)
+
+                for v in obj.values():
+                    _walk(v)
+
+            _walk(data)
+            if clips_found:
+                self.log(f"  [catalog-api] Intercepted {clips_found} new clips from API: {url[:70]}", "M3U8")
+                self.stats_signal.emit(self.db.stats())
+
+        except json.JSONDecodeError:
+            pass
+        except Exception as e:
+            err = str(e)
+            if not any(x in err for x in ('decode', 'Connection', 'Target closed', 'disposed')):
+                pass  # Silent — don't spam log for every non-JSON response
 
     async def _crawl_clip(self, context, url, depth):
         """
@@ -2998,6 +3496,1507 @@ class CrawlerWorker(QThread):
         """Check if URL is an individual item page using the active profile."""
         return self.profile.is_item(url)
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DIRECT HTTP SCRAPER  — bypasses browser for metadata collection
+# ─────────────────────────────────────────────────────────────────────────────
+
+class DirectScrapeWorker(QThread):
+    """
+    Lightweight HTTP-only metadata scraper. No browser rendering.
+    Modes:
+      - api_discover:  Launch browser once, capture all XHR/fetch traffic,
+                       report API endpoints and shapes.
+      - direct_http:   Fetch metadata via HTTP only: sitemaps, __NEXT_DATA__,
+                       _next/data endpoints, and clip ID probing.
+    """
+    log_signal    = pyqtSignal(str, str)
+    stats_signal  = pyqtSignal(dict)
+    clip_signal   = pyqtSignal(dict)
+    status_signal = pyqtSignal(str)
+    finished      = pyqtSignal()
+
+    # Shared HTTP headers to look like a real browser
+    HEADERS = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                      '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate',
+    }
+
+    def __init__(self, cfg, db, mode='direct_http'):
+        super().__init__()
+        self.cfg   = cfg
+        self.db    = db
+        self.mode  = mode
+        self._stop = threading.Event()
+        self._db_lock = threading.Lock()  # Thread-safe DB access for concurrent mode
+
+    def stop(self): self._stop.set()
+
+    def log(self, msg, level='INFO'):
+        self.log_signal.emit(f"[{datetime.now().strftime('%H:%M:%S')}] [{level:5s}] {msg}", level)
+
+    def run(self):
+        self.status_signal.emit("running")
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            if self.mode == 'api_discover':
+                loop.run_until_complete(self._api_discover())
+            else:
+                loop.run_until_complete(self._direct_scrape())
+        except Exception as e:
+            import traceback as _tb
+            self.log(f"DirectScrape crashed: {e}\n{_tb.format_exc()[:500]}", "ERROR")
+        finally:
+            try:
+                loop.close()
+            except Exception:
+                pass
+        self.status_signal.emit("stopped")
+        self.finished.emit()
+
+    # ── HTTP helpers ──────────────────────────────────────────────────────────
+
+    def _http_get(self, url, headers=None, timeout=15, max_size=10_000_000):
+        """Simple HTTP GET that returns (status_code, body_bytes) or (0, b'') on error."""
+        import urllib.request, urllib.error, gzip, io
+        hdrs = dict(self.HEADERS)
+        if headers:
+            hdrs.update(headers)
+        req = urllib.request.Request(url, headers=hdrs)
+        try:
+            resp = urllib.request.urlopen(req, timeout=timeout)
+            data = resp.read(max_size)
+            # Handle gzip
+            if resp.headers.get('Content-Encoding') == 'gzip':
+                data = gzip.decompress(data)
+            return resp.status, data
+        except urllib.error.HTTPError as e:
+            return e.code, b''
+        except Exception:
+            return 0, b''
+
+    def _http_get_json(self, url, headers=None, timeout=15):
+        """HTTP GET returning parsed JSON or None."""
+        hdrs = dict(self.HEADERS)
+        hdrs['Accept'] = 'application/json, text/plain, */*'
+        if headers:
+            hdrs.update(headers)
+        code, data = self._http_get(url, hdrs, timeout)
+        if code == 200 and data:
+            try:
+                return json.loads(data)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return None
+        return None
+
+    def _save_clip_meta(self, meta):
+        """Save/update clip in DB (thread-safe). Returns True if new."""
+        clip_id = str(meta.get('clip_id', '') or '').strip()
+        if not clip_id:
+            return False
+        with self._db_lock:
+            is_new = self.db.save_clip(meta)
+            if not is_new:
+                self.db.update_metadata(clip_id, meta)
+        return is_new
+
+    def _download_thumb(self, url, clip_id, thumb_dir):
+        """Download thumbnail to disk (thread-safe for DB update)."""
+        if not url or not clip_id:
+            return
+        out = os.path.join(thumb_dir, f"{clip_id}.jpg")
+        if os.path.isfile(out) and os.path.getsize(out) > 0:
+            return
+        try:
+            import urllib.request
+            req = urllib.request.Request(url)
+            req.add_header('User-Agent', 'Mozilla/5.0')
+            resp = urllib.request.urlopen(req, timeout=10)
+            data = resp.read(2_000_000)
+            resp.close()
+            if len(data) > 500:
+                with open(out, 'wb') as f:
+                    f.write(data)
+                with self._db_lock:
+                    self.db.update_thumb_path(clip_id, out)
+        except Exception:
+            pass
+
+    # ── API Discovery (browser-based, one-time) ──────────────────────────────
+
+    async def _api_discover(self):
+        """Launch browser, browse /stock-footage, capture all XHR/fetch traffic."""
+        from playwright.async_api import async_playwright
+
+        self.log("=== API DISCOVERY MODE ===", "OK")
+        self.log("Launching browser to capture Artlist's internal API endpoints...", "INFO")
+
+        discovered = {}  # url_pattern -> {method, content_type, sample_keys, count}
+        clip_data_endpoints = []  # endpoints that returned clip-like data
+
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=True)
+            context = await browser.new_context(
+                user_agent=self.HEADERS['User-Agent'],
+                viewport={'width': 1440, 'height': 900},
+            )
+            page = await context.new_page()
+
+            async def _on_resp(response):
+                try:
+                    url = response.url
+                    rt = response.request.resource_type
+                    if rt not in ('xhr', 'fetch', 'document'):
+                        return
+                    ct = response.headers.get('content-type', '')
+                    method = response.request.method
+
+                    # Normalize URL: strip query params for pattern matching
+                    parsed = urlparse(url)
+                    path = parsed.path
+                    domain = parsed.netloc
+                    pattern_key = f"{method} {domain}{path}"
+
+                    if pattern_key not in discovered:
+                        discovered[pattern_key] = {
+                            'method': method,
+                            'content_type': ct[:60],
+                            'count': 0,
+                            'sample_url': url[:200],
+                            'sample_query': parsed.query[:200] if parsed.query else '',
+                            'has_clip_data': False,
+                            'response_keys': [],
+                            'clip_count': 0,
+                            'request_body': '',
+                            'request_headers': {},
+                        }
+                    discovered[pattern_key]['count'] += 1
+
+                    # Try to parse JSON responses for clip data
+                    if 'json' in ct:
+                        try:
+                            body = await response.text()
+                            if len(body) > 20 and len(body) < 5_000_000:
+                                data = json.loads(body)
+                                if isinstance(data, dict):
+                                    discovered[pattern_key]['response_keys'] = list(data.keys())[:20]
+                                clips_found = self._walk_for_clips(data)
+                                if clips_found:
+                                    discovered[pattern_key]['has_clip_data'] = True
+                                    discovered[pattern_key]['clip_count'] += len(clips_found)
+                                    # Capture request body for GraphQL endpoints
+                                    req_body = response.request.post_data or ''
+                                    req_hdrs = dict(response.request.headers)
+                                    discovered[pattern_key]['request_body'] = req_body[:2000]
+                                    discovered[pattern_key]['request_headers'] = {
+                                        k: v for k, v in req_hdrs.items()
+                                        if k.lower() not in ('host', 'content-length', 'connection',
+                                                              'accept-encoding')
+                                    }
+                                    clip_data_endpoints.append({
+                                        'url': url,
+                                        'method': method,
+                                        'clip_count': len(clips_found),
+                                        'sample_clip': clips_found[0] if clips_found else {},
+                                        'request_body': req_body[:2000],
+                                    })
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+            page.on('response', _on_resp)
+
+            # ── Phase 1: Load main catalog page ──────────────────────────
+            self.log("Phase 1: Loading /stock-footage ...", "INFO")
+            await page.goto('https://artlist.io/stock-footage', wait_until='networkidle', timeout=30000)
+            await asyncio.sleep(3)
+
+            # ── Phase 2: Scroll to trigger lazy loading ──────────────────
+            self.log("Phase 2: Scrolling to trigger API calls...", "INFO")
+            for i in range(8):
+                if self._stop.is_set():
+                    break
+                await page.evaluate("window.scrollBy(0, 800)")
+                await asyncio.sleep(1.5)
+
+            # ── Phase 3: Try a search query ──────────────────────────────
+            self.log("Phase 3: Searching 'nature' to trigger search API...", "INFO")
+            try:
+                search_input = await page.query_selector('input[type="search"], input[type="text"], input[placeholder*="earch"]')
+                if search_input:
+                    await search_input.fill('nature')
+                    await asyncio.sleep(0.5)
+                    await search_input.press('Enter')
+                    await asyncio.sleep(4)
+                    # Scroll search results
+                    for _ in range(4):
+                        await page.evaluate("window.scrollBy(0, 600)")
+                        await asyncio.sleep(1.5)
+            except Exception as e:
+                self.log(f"Search attempt: {e}", "DEBUG")
+
+            # ── Phase 4: Try navigating to a clip page ───────────────────
+            self.log("Phase 4: Loading a sample clip page...", "INFO")
+            try:
+                await page.goto(
+                    'https://artlist.io/stock-footage/clip/buildings-traffic-new-york-usa/6451306',
+                    wait_until='networkidle', timeout=20000)
+                await asyncio.sleep(3)
+            except Exception as e:
+                self.log(f"Clip page: {e}", "DEBUG")
+
+            # ── Phase 5: Extract __NEXT_DATA__ ───────────────────────────
+            self.log("Phase 5: Extracting __NEXT_DATA__ buildId...", "INFO")
+            try:
+                next_data = await page.evaluate("""
+                    (() => {
+                        const nd = document.getElementById('__NEXT_DATA__');
+                        if (nd) {
+                            try {
+                                const d = JSON.parse(nd.textContent);
+                                return {
+                                    buildId: d.buildId || null,
+                                    top_keys: Object.keys(d),
+                                    props_keys: d.props ? Object.keys(d.props) : [],
+                                    page_props_keys: d.props?.pageProps ? Object.keys(d.props.pageProps) : [],
+                                    page: d.page || null,
+                                    has_clips: !!(JSON.stringify(d).match(/clipId|clip_id/i)),
+                                    total_size: JSON.stringify(d).length,
+                                };
+                            } catch(e) { return {error: e.message}; }
+                        }
+                        return null;
+                    })()
+                """)
+                if next_data:
+                    self.log(f"  __NEXT_DATA__ found!", "OK")
+                    self.log(f"    buildId: {next_data.get('buildId', 'N/A')}", "M3U8")
+                    self.log(f"    page: {next_data.get('page', 'N/A')}", "INFO")
+                    self.log(f"    top_keys: {next_data.get('top_keys', [])}", "INFO")
+                    self.log(f"    props_keys: {next_data.get('props_keys', [])}", "INFO")
+                    self.log(f"    pageProps keys: {next_data.get('page_props_keys', [])}", "INFO")
+                    self.log(f"    has clip data: {next_data.get('has_clips', False)}", "INFO")
+                    self.log(f"    total JSON size: {next_data.get('total_size', 0):,} bytes", "INFO")
+
+                    # Save buildId for direct HTTP mode
+                    build_id = next_data.get('buildId')
+                    if build_id:
+                        cfg = load_config()
+                        cfg['artlist_build_id'] = build_id
+                        save_config(cfg)
+                        self.log(f"  Saved buildId to config: {build_id}", "OK")
+                else:
+                    self.log("  __NEXT_DATA__ not found on page", "WARN")
+            except Exception as e:
+                self.log(f"  __NEXT_DATA__ extraction error: {e}", "WARN")
+
+            await browser.close()
+
+        # ── Report results ────────────────────────────────────────────────
+        self.log("", "INFO")
+        self.log("=" * 70, "OK")
+        self.log("  API DISCOVERY RESULTS", "OK")
+        self.log("=" * 70, "OK")
+
+        # Sort by count
+        sorted_eps = sorted(discovered.items(), key=lambda x: x[1]['count'], reverse=True)
+
+        # Show API-like endpoints (not static assets)
+        self.log("", "INFO")
+        self.log("--- XHR/Fetch Endpoints (sorted by frequency) ---", "INFO")
+        for pattern, info in sorted_eps:
+            if any(x in pattern for x in ['.js', '.css', '.png', '.jpg', '.svg', '.woff', '.ico', 'favicon']):
+                continue
+            clip_marker = " ** HAS CLIP DATA **" if info['has_clip_data'] else ""
+            self.log(
+                f"  [{info['count']:3d}x] {pattern[:80]}  "
+                f"ct:{info['content_type'][:30]}{clip_marker}",
+                "M3U8" if info['has_clip_data'] else "INFO")
+            if info['sample_query']:
+                self.log(f"         query: {info['sample_query'][:120]}", "DEBUG")
+            if info['response_keys']:
+                self.log(f"         keys: {info['response_keys']}", "DEBUG")
+
+        self.log("", "INFO")
+        if clip_data_endpoints:
+            self.log(f"--- CLIP DATA ENDPOINTS ({len(clip_data_endpoints)} found) ---", "OK")
+            for ep in clip_data_endpoints:
+                self.log(f"  {ep['method']} {ep['url'][:120]}", "M3U8")
+                self.log(f"    clips: {ep['clip_count']}", "INFO")
+                if ep.get('sample_clip'):
+                    sc = ep['sample_clip']
+                    self.log(f"    sample: id={sc.get('clip_id','')} title={sc.get('title','')[:50]}", "INFO")
+                if ep.get('request_body'):
+                    try:
+                        gql = json.loads(ep['request_body'])
+                        op = gql.get('operationName', '')
+                        vkeys = list(gql.get('variables', {}).keys())
+                        self.log(f"    GraphQL op: {op}, variables: {vkeys}", "M3U8")
+                        q = gql.get('query', '')
+                        self.log(f"    query preview: {q[:120]}...", "DEBUG")
+                    except Exception:
+                        self.log(f"    request body: {ep['request_body'][:120]}...", "DEBUG")
+
+            # Save the best GraphQL template
+            best_ep = max(clip_data_endpoints, key=lambda x: x['clip_count'])
+            if best_ep.get('request_body'):
+                try:
+                    gql = json.loads(best_ep['request_body'])
+                    # Also find the matching discovered entry for headers
+                    best_key = f"POST {urlparse(best_ep['url']).netloc}{urlparse(best_ep['url']).path}"
+                    hdrs = discovered.get(best_key, {}).get('request_headers', {})
+                    cfg = load_config()
+                    cfg['artlist_graphql'] = {
+                        'url': best_ep['url'],
+                        'query': gql.get('query', ''),
+                        'variables': gql.get('variables', {}),
+                        'operation': gql.get('operationName', ''),
+                        'headers': hdrs,
+                    }
+                    save_config(cfg)
+                    self.log("", "INFO")
+                    self.log("Saved GraphQL template to config for Direct HTTP mode.", "OK")
+                except Exception:
+                    pass
+        else:
+            self.log("  No endpoints returned clip data during browsing.", "WARN")
+
+        self.log("", "INFO")
+        self.log("Discovery complete. Now run 'Direct HTTP' mode to paginate the catalog.", "OK")
+
+    def _walk_for_clips(self, obj, depth=0, _debug_first=False):
+        """Walk a JSON structure looking for clip-like objects. Returns list of dicts."""
+        if depth > 12:
+            return []
+        clips = []
+        if isinstance(obj, list):
+            for item in obj:
+                clips.extend(self._walk_for_clips(item, depth + 1, _debug_first))
+        elif isinstance(obj, dict):
+            # Check if this looks like a clip object — accept numeric id 4+ digits
+            cid = str(obj.get('id', '') or obj.get('clipId', '') or obj.get('clip_id', '') or
+                       obj.get('assetId', '') or obj.get('asset_id', '') or '')
+            if cid and re.match(r'^\d{4,}$', cid):
+                # Log raw keys of first clip found (diagnostic for field mapping)
+                if not hasattr(self, '_logged_sample_clip'):
+                    self._logged_sample_clip = True
+                    self.log(f"  [DIAG] Clip object keys: {sorted(obj.keys())[:30]}", "DEBUG")
+                    for dk in list(obj.keys())[:20]:
+                        dv = obj[dk]
+                        if isinstance(dv, (str, int, float, bool)) and dv:
+                            self.log(f"  [DIAG]   {dk} = {str(dv)[:100]}", "DEBUG")
+                        elif isinstance(dv, dict):
+                            self.log(f"  [DIAG]   {dk} = dict({list(dv.keys())[:8]})", "DEBUG")
+                        elif isinstance(dv, list) and dv:
+                            self.log(f"  [DIAG]   {dk} = list[{len(dv)}]", "DEBUG")
+                # This has a clip-like ID — extract everything we can
+                # ── Title ──
+                title = str(
+                    obj.get('clipName', '') or obj.get('title', '') or obj.get('name', '') or
+                    obj.get('displayName', '') or
+                    (obj.get('clipNameForUrl', '').replace('-', ' ').title() if obj.get('clipNameForUrl') else '') or
+                    (obj.get('slug', '').replace('-', ' ').title() if obj.get('slug') else '') or
+                    obj.get('description', '') or '')
+                # ── Slug → URL ──
+                slug = str(obj.get('clipNameForUrl', '') or obj.get('slug', '') or obj.get('urlSlug', '') or '')
+                # ── Creator/artist ──
+                creator = str(
+                    obj.get('filmMakerDisplayName', '') or obj.get('filmmakerDisplayName', '') or
+                    obj.get('artistName', '') or obj.get('artist_name', '') or
+                    obj.get('creatorName', '') or obj.get('creator_name', '') or
+                    obj.get('displayArtistName', '') or obj.get('authorName', '') or '')
+                if not creator:
+                    for ck in ('artist', 'creator', 'filmmaker', 'filmMaker', 'author', 'owner'):
+                        av = obj.get(ck)
+                        if isinstance(av, dict):
+                            creator = str(av.get('name', '') or av.get('displayName', '') or
+                                          av.get('fullName', '') or av.get('slug', '') or '')
+                            break
+                        elif isinstance(av, str) and av:
+                            creator = av; break
+                # ── Thumbnail ──
+                thumb = ''
+                for tk in ('thumbnailUrl', 'thumbnail_url', 'thumbnail', 'imageUrl',
+                           'image_url', 'posterUrl', 'poster_url', 'coverUrl', 'cover_url',
+                           'previewImageUrl', 'preview_image_url', 'image', 'poster', 'cover'):
+                    tv = obj.get(tk)
+                    if isinstance(tv, str) and tv.startswith('http'):
+                        thumb = tv; break
+                    elif isinstance(tv, dict) and tv.get('url'):
+                        thumb = str(tv['url']); break
+                # ── Duration (Artlist returns ms, convert to seconds) ──
+                dur_raw = obj.get('duration', '') or obj.get('length', '') or obj.get('durationInSeconds', '') or ''
+                if dur_raw:
+                    try:
+                        dur_val = int(dur_raw)
+                        # Artlist returns ms (values >1000), convert to seconds
+                        duration = str(round(dur_val / 1000, 1)) if dur_val > 1000 else str(dur_val)
+                    except (ValueError, TypeError):
+                        duration = str(dur_raw)
+                else:
+                    duration = ''
+                # ── Resolution (Artlist uses width/height, not a 'resolution' field) ──
+                w = obj.get('width', '')
+                h = obj.get('height', '')
+                resolution = str(obj.get('resolution', '') or obj.get('maxResolution', '') or obj.get('quality', '') or '')
+                if not resolution and w and h:
+                    resolution = f"{w}x{h}"
+                # ── Source URL ──
+                source_url = str(obj.get('url', '') or obj.get('pageUrl', '') or
+                                  obj.get('shareUrl', '') or obj.get('link', '') or '')
+                if not source_url and slug:
+                    source_url = f'https://artlist.io/stock-footage/clip/{slug}/{cid}'
+                # ── M3U8 / Video URL (clipPath is the HLS manifest!) ──
+                m3u8 = ''
+                for vk in ('clipPath', 'clip_path', 'videoUrl', 'video_url', 'hlsUrl', 'hls_url',
+                           'previewUrl', 'preview_url', 'contentUrl', 'content_url',
+                           'streamUrl', 'stream_url', 'previewVideoUrl', 'mp4Url'):
+                    vv = obj.get(vk)
+                    if isinstance(vv, str) and vv.startswith('http'):
+                        m3u8 = vv; break
+                # ── Tags (build from boolean flags if no tags array) ──
+                tags_raw = obj.get('tags', obj.get('keywords', obj.get('labels', [])))
+                if isinstance(tags_raw, str):
+                    tags = tags_raw
+                elif isinstance(tags_raw, list) and tags_raw:
+                    tags = ', '.join(
+                        str(t.get('name', '') if isinstance(t, dict) else t)
+                        for t in tags_raw[:25])
+                else:
+                    # Build tags from Artlist boolean flags
+                    flag_tags = []
+                    if obj.get('isMadeWithAi'): flag_tags.append('AI-generated')
+                    if obj.get('isOriginal'): flag_tags.append('Original')
+                    if obj.get('isVfx'): flag_tags.append('VFX')
+                    if obj.get('isNew'): flag_tags.append('New')
+                    orient = obj.get('orientation', '')
+                    if orient: flag_tags.append(str(orient).capitalize())
+                    tags = ', '.join(flag_tags)
+                # ── Collection/story ──
+                collection = str(
+                    obj.get('storyName', '') or obj.get('collectionName', '') or
+                    obj.get('collection_name', '') or obj.get('story_name', '') or
+                    obj.get('folderName', '') or obj.get('folder_name', '') or '')
+                if not collection:
+                    for stk in ('collection', 'story', 'folder'):
+                        sv = obj.get(stk)
+                        if isinstance(sv, dict):
+                            collection = str(sv.get('name', '') or sv.get('title', '') or '')
+                            break
+                        elif isinstance(sv, str) and sv:
+                            collection = sv; break
+                # Only require the numeric ID — don't require title/thumb
+                # (GraphQL responses may have minimal fields on first page)
+                # ── Formats (Artlist uses availableFormats as a list) ──
+                fmt_raw = obj.get('availableFormats', obj.get('formats', obj.get('available_formats', '')))
+                if isinstance(fmt_raw, list):
+                    formats = ', '.join(str(f) for f in fmt_raw)
+                else:
+                    formats = str(fmt_raw) if fmt_raw else ''
+                clips.append({
+                    'clip_id': cid,
+                    'title': title,
+                    'creator': creator,
+                    'thumbnail_url': thumb,
+                    'duration': duration,
+                    'resolution': resolution,
+                    'tags': tags,
+                    'collection': collection,
+                    'frame_rate': str(obj.get('fps', '') or obj.get('frameRate', '') or
+                                      obj.get('frame_rate', '') or ''),
+                    'camera': str(obj.get('camera', '') or obj.get('cameraModel', '') or
+                                   obj.get('camera_model', '') or ''),
+                    'formats': formats,
+                    'source_url': source_url,
+                    'm3u8_url': m3u8,
+                })
+                return clips  # Don't recurse into children of a clip object
+            for v in obj.values():
+                clips.extend(self._walk_for_clips(v, depth + 1, _debug_first))
+        return clips
+
+    # ── Direct HTTP Scrape (no browser) ───────────────────────────────────────
+
+    async def _direct_scrape(self):
+        """Main direct scrape pipeline: browser bootstrap → GraphQL pagination."""
+        self.log("=== DIRECT HTTP SCRAPE MODE ===", "OK")
+
+        thumb_dir = os.path.join(
+            os.environ.get('APPDATA', os.path.expanduser('~')),
+            'ArtlistScraper', 'thumbnails')
+        os.makedirs(thumb_dir, exist_ok=True)
+
+        total_new = 0
+        total_updated = 0
+        graphql_templates = []
+
+        # Check for saved GraphQL template from prior API Discovery
+        saved_gql = self.cfg.get('artlist_graphql')
+        if not saved_gql:
+            saved_gql = load_config().get('artlist_graphql')
+
+        if saved_gql and saved_gql.get('query'):
+            self.log("Found saved GraphQL template from prior API Discovery.", "OK")
+            graphql_templates = [saved_gql]
+        elif not self._stop.is_set():
+            # ── Phase 0: Browser bootstrap to capture GraphQL templates (~30s) ──
+            self.log("", "INFO")
+            self.log("Phase 0: Browser bootstrap — capturing GraphQL queries (~30s)...", "INFO")
+            try:
+                _, graphql_templates, bootstrap_clips = await self._browser_bootstrap()
+                if bootstrap_clips:
+                    new, upd = self._ingest_clips(bootstrap_clips, thumb_dir, "bootstrap")
+                    total_new += new
+                    total_updated += upd
+            except Exception as e:
+                self.log(f"  Bootstrap error: {e}", "WARN")
+
+        # ── Phase 1: GraphQL pagination (the main engine) ─────────────────
+        if not self._stop.is_set() and graphql_templates:
+            self.log("", "INFO")
+            self.log("Phase 1: GraphQL pagination — scraping full catalog...", "OK")
+            self._graphql_paginate(graphql_templates, thumb_dir)
+            # Clips and thumbnails saved directly to DB inside paginator
+        elif not graphql_templates:
+            self.log("", "INFO")
+            self.log("No GraphQL templates captured. Possible causes:", "WARN")
+            self.log("  - Chromium not installed (install browser first)", "WARN")
+            self.log("  - Cloudflare blocked the headless browser", "WARN")
+            self.log("  - Site structure changed", "WARN")
+
+        # ── Phase 2: Sitemap check (supplemental) ─────────────────────────
+        if not self._stop.is_set():
+            self.log("", "INFO")
+            self.log("Phase 2: Checking sitemaps for additional URLs...", "INFO")
+            sitemap_clips = self._check_sitemaps()
+            if sitemap_clips:
+                new, upd = self._ingest_clips(sitemap_clips, thumb_dir, "sitemap")
+                total_new += new
+                total_updated += upd
+
+        # ── Summary ───────────────────────────────────────────────────────
+        stats = self.db.stats()
+        self.log("", "INFO")
+        self.log("=" * 60, "OK")
+        self.log(f"  DIRECT HTTP SCRAPE COMPLETE", "OK")
+        self.log(f"  Total clips in database: {stats.get('clips', 0):,}", "OK")
+        self.log("=" * 60, "OK")
+        self.stats_signal.emit(stats)
+
+    # ── Browser bootstrap ─────────────────────────────────────────────────────
+
+    async def _browser_bootstrap(self):
+        """Quick browser session to capture GraphQL queries + headers for replay."""
+        api_urls = []
+        clips = []
+        graphql_templates = []  # list of {query, variables, headers, clip_count}
+
+        from playwright.async_api import async_playwright
+
+        async with async_playwright() as pw:
+            # Check if chromium is actually installed
+            exe = pw.chromium.executable_path
+            if not os.path.isfile(exe):
+                self.log("  Chromium not installed — skipping bootstrap.", "WARN")
+                self.log("  Install browser, then re-run; or use 'API Discovery' mode first.", "WARN")
+                return '', api_urls, clips
+            browser = await pw.chromium.launch(headless=True)
+            context = await browser.new_context(
+                user_agent=self.HEADERS['User-Agent'],
+                viewport={'width': 1440, 'height': 900},
+            )
+            page = await context.new_page()
+
+            async def _on_resp(response):
+                try:
+                    url = response.url
+                    rt = response.request.resource_type
+                    if rt not in ('xhr', 'fetch'):
+                        return
+                    ct = response.headers.get('content-type', '')
+                    if 'json' not in ct:
+                        return
+
+                    # Only care about the GraphQL endpoint
+                    if 'graphql' not in url.lower():
+                        return
+
+                    body = await response.text()
+                    if len(body) < 50 or len(body) > 5_000_000:
+                        return
+                    resp_data = json.loads(body)
+
+                    # Check if this response has clip data
+                    found_clips = self._walk_for_clips(resp_data)
+                    if not found_clips:
+                        return
+
+                    clips.extend(found_clips)
+
+                    # Capture the REQUEST body (GraphQL query + variables)
+                    req = response.request
+                    req_body = req.post_data
+                    req_headers = {k: v for k, v in req.headers.items()
+                                   if k.lower() not in ('host', 'content-length', 'connection',
+                                                         'accept-encoding', 'origin', 'referer')}
+
+                    if req_body:
+                        try:
+                            gql = json.loads(req_body)
+                            graphql_templates.append({
+                                'url': url,
+                                'query': gql.get('query', ''),
+                                'variables': gql.get('variables', {}),
+                                'operation': gql.get('operationName', ''),
+                                'headers': req_headers,
+                                'clip_count': len(found_clips),
+                            })
+                        except json.JSONDecodeError:
+                            pass
+
+                except Exception:
+                    pass
+
+            page.on('response', _on_resp)
+
+            # Navigate to catalog and scroll to trigger GraphQL calls
+            self.log("  Loading /stock-footage ...", "INFO")
+            try:
+                await page.goto('https://artlist.io/stock-footage',
+                                wait_until='networkidle', timeout=30000)
+            except Exception:
+                try:
+                    await page.goto('https://artlist.io/stock-footage', timeout=30000)
+                except Exception as e:
+                    self.log(f"  Page load error: {e}", "WARN")
+                    await browser.close()
+                    return '', api_urls, clips
+
+            await asyncio.sleep(3)
+
+            # Scroll to trigger lazy-loaded GraphQL calls
+            for i in range(6):
+                if self._stop.is_set():
+                    break
+                await page.evaluate("window.scrollBy(0, 1000)")
+                await asyncio.sleep(1.5)
+
+            await browser.close()
+
+        # Deduplicate clips
+        seen_ids = set()
+        unique_clips = []
+        for c in clips:
+            cid = c.get('clip_id', '')
+            if cid and cid not in seen_ids:
+                seen_ids.add(cid)
+                unique_clips.append(c)
+
+        self.log(f"  Captured {len(graphql_templates)} GraphQL templates, "
+                 f"{len(unique_clips)} unique clips", "OK")
+
+        # Log GraphQL details
+        for i, tpl in enumerate(graphql_templates):
+            op = tpl.get('operation', 'unknown')
+            vc = tpl.get('clip_count', 0)
+            vkeys = list(tpl.get('variables', {}).keys())
+            self.log(f"  Template {i}: operation={op}, clips={vc}, vars={vkeys}", "INFO")
+
+        # Save best GraphQL template to config for pure HTTP replay
+        if graphql_templates:
+            # Pick the template that returned the most clips
+            best = max(graphql_templates, key=lambda x: x['clip_count'])
+            cfg = load_config()
+            cfg['artlist_graphql'] = {
+                'url': best['url'],
+                'query': best['query'],
+                'variables': best['variables'],
+                'operation': best.get('operation', ''),
+                'headers': best['headers'],
+            }
+            save_config(cfg)
+            self.log(f"  Saved GraphQL template: operation={best.get('operation','')}, "
+                     f"url={best['url'][:60]}", "M3U8")
+
+        return '', graphql_templates, unique_clips
+
+    # ── Phase 2: Scrape discovered API endpoints ──────────────────────────────
+
+    # ── Stock footage keyword universe ──────────────────────────────────────
+    SEARCH_TERMS = [
+        # Nature & landscapes
+        'nature', 'landscape', 'mountain', 'forest', 'ocean', 'river', 'lake',
+        'waterfall', 'desert', 'canyon', 'valley', 'field', 'meadow', 'prairie',
+        'jungle', 'rainforest', 'swamp', 'marsh', 'glacier', 'volcano', 'island',
+        'beach', 'coast', 'cliff', 'cave', 'coral reef', 'tundra', 'savanna',
+        # Sky & weather
+        'sky', 'clouds', 'sunset', 'sunrise', 'storm', 'lightning', 'rain',
+        'snow', 'fog', 'mist', 'rainbow', 'aurora', 'stars', 'moon', 'sun',
+        'wind', 'tornado', 'hurricane', 'blizzard', 'hail',
+        # Water
+        'water', 'wave', 'splash', 'underwater', 'diving', 'swimming', 'surfing',
+        'pond', 'stream', 'rapids', 'dam', 'fountain', 'ice', 'frost', 'dew',
+        # Animals
+        'animal', 'wildlife', 'bird', 'fish', 'horse', 'dog', 'cat', 'lion',
+        'elephant', 'bear', 'wolf', 'deer', 'eagle', 'butterfly', 'insect',
+        'whale', 'dolphin', 'shark', 'turtle', 'snake', 'monkey', 'gorilla',
+        'penguin', 'flamingo', 'owl', 'hawk', 'parrot', 'jellyfish', 'octopus',
+        'coral', 'bee', 'ant', 'spider', 'frog', 'lizard', 'crocodile',
+        # Plants & flowers
+        'flower', 'tree', 'plant', 'garden', 'grass', 'leaf', 'bloom', 'rose',
+        'tulip', 'sunflower', 'cherry blossom', 'palm tree', 'cactus', 'moss',
+        'mushroom', 'vine', 'bamboo', 'fern', 'pine', 'oak', 'maple',
+        # Urban & architecture
+        'city', 'street', 'building', 'skyscraper', 'bridge', 'road', 'highway',
+        'traffic', 'downtown', 'skyline', 'architecture', 'window', 'door',
+        'stairs', 'elevator', 'parking', 'tunnel', 'alley', 'rooftop', 'balcony',
+        'suburb', 'neighborhood', 'apartment', 'house', 'mansion', 'castle',
+        'church', 'mosque', 'temple', 'monument', 'statue', 'fountain', 'plaza',
+        'market', 'mall', 'shop', 'restaurant', 'cafe', 'bar', 'hotel',
+        # People & lifestyle
+        'people', 'woman', 'man', 'child', 'baby', 'family', 'couple', 'friends',
+        'crowd', 'portrait', 'face', 'hands', 'eyes', 'smile', 'walking',
+        'running', 'dancing', 'laughing', 'crying', 'talking', 'eating',
+        'drinking', 'sleeping', 'working', 'reading', 'writing', 'cooking',
+        'shopping', 'traveling', 'hiking', 'camping', 'fishing', 'climbing',
+        'yoga', 'meditation', 'exercise', 'gym', 'sports', 'football',
+        'basketball', 'soccer', 'tennis', 'golf', 'cycling', 'skateboarding',
+        'surfing', 'skiing', 'snowboarding', 'marathon', 'boxing', 'wrestling',
+        # Aerial & drone
+        'drone', 'aerial', 'bird eye', 'flyover', 'overhead', 'top down',
+        'helicopter', 'panoramic', 'orbit', 'reveal',
+        # Technology & science
+        'technology', 'computer', 'laptop', 'phone', 'screen', 'code', 'data',
+        'network', 'server', 'robot', 'AI', 'machine', 'circuit', 'chip',
+        'laboratory', 'microscope', 'telescope', 'satellite', 'radar', 'antenna',
+        'solar panel', 'wind turbine', 'nuclear', 'electric', 'battery', 'cable',
+        'fiber optic', 'hologram', 'VR', 'drone technology',
+        # Business & office
+        'business', 'office', 'meeting', 'conference', 'presentation', 'handshake',
+        'teamwork', 'brainstorming', 'whiteboard', 'desk', 'chair', 'corporate',
+        'startup', 'entrepreneur', 'leader', 'CEO', 'interview', 'hiring',
+        # Industry & manufacturing
+        'factory', 'manufacturing', 'industrial', 'warehouse', 'construction',
+        'crane', 'welding', 'assembly', 'conveyor', 'machinery', 'tools',
+        'steel', 'concrete', 'wood', 'mining', 'oil', 'gas', 'pipeline',
+        'power plant', 'refinery', 'shipping', 'container', 'port', 'dock',
+        # Transport
+        'car', 'truck', 'bus', 'train', 'airplane', 'helicopter', 'boat',
+        'ship', 'yacht', 'motorcycle', 'bicycle', 'subway', 'taxi', 'ambulance',
+        'fire truck', 'police car', 'rocket', 'spaceship', 'airport', 'railway',
+        'highway', 'intersection', 'parking lot', 'garage',
+        # Food & drink
+        'food', 'cooking', 'kitchen', 'chef', 'baking', 'grilling', 'barbecue',
+        'pizza', 'pasta', 'sushi', 'salad', 'fruit', 'vegetable', 'meat',
+        'bread', 'cake', 'chocolate', 'coffee', 'tea', 'wine', 'beer',
+        'cocktail', 'juice', 'milk', 'cheese', 'ice cream', 'breakfast',
+        'lunch', 'dinner', 'feast', 'picnic', 'market',
+        # Art & music
+        'art', 'painting', 'sculpture', 'museum', 'gallery', 'canvas', 'brush',
+        'music', 'guitar', 'piano', 'drums', 'violin', 'concert', 'orchestra',
+        'DJ', 'headphones', 'microphone', 'speaker', 'stage', 'performance',
+        'theater', 'cinema', 'camera', 'photography', 'studio', 'film',
+        # Abstract & visual
+        'abstract', 'texture', 'pattern', 'geometric', 'fractal', 'particles',
+        'smoke', 'fire', 'explosion', 'sparks', 'glitter', 'bokeh', 'lens flare',
+        'light', 'shadow', 'silhouette', 'reflection', 'mirror', 'glass',
+        'crystal', 'bubble', 'liquid', 'ink', 'paint', 'color', 'neon',
+        'glow', 'laser', 'holographic', 'prism', 'gradient', 'motion blur',
+        # Time & motion
+        'timelapse', 'slow motion', 'hyperlapse', 'long exposure', 'fast motion',
+        'time lapse', 'stop motion', 'spinning', 'rotating', 'flowing',
+        'falling', 'rising', 'floating', 'flying', 'sinking',
+        # Seasons & holidays
+        'spring', 'summer', 'autumn', 'fall', 'winter', 'christmas', 'halloween',
+        'easter', 'valentine', 'new year', 'thanksgiving', 'fireworks', 'parade',
+        'carnival', 'festival', 'celebration', 'wedding', 'birthday', 'party',
+        # Health & medical
+        'medical', 'hospital', 'doctor', 'nurse', 'surgery', 'medicine',
+        'pharmacy', 'health', 'fitness', 'wellness', 'spa', 'massage',
+        'dental', 'x-ray', 'MRI', 'DNA', 'cell', 'virus', 'bacteria',
+        # Education & learning
+        'school', 'university', 'classroom', 'student', 'teacher', 'book',
+        'library', 'study', 'graduation', 'lecture', 'chalkboard', 'notebook',
+        # Agriculture & farming
+        'farm', 'agriculture', 'harvest', 'tractor', 'field', 'crop', 'wheat',
+        'corn', 'rice', 'vineyard', 'orchard', 'barn', 'cattle', 'sheep',
+        'chicken', 'pig', 'milk', 'eggs', 'organic', 'greenhouse',
+        # Space & science
+        'space', 'galaxy', 'nebula', 'planet', 'earth', 'mars', 'jupiter',
+        'asteroid', 'comet', 'constellation', 'milky way', 'black hole',
+        'astronaut', 'ISS', 'rocket launch', 'observatory',
+        # Emotions & concepts
+        'love', 'happiness', 'sadness', 'anger', 'fear', 'hope', 'freedom',
+        'peace', 'war', 'protest', 'revolution', 'poverty', 'wealth',
+        'success', 'failure', 'dream', 'memory', 'time', 'death', 'life',
+        'birth', 'growth', 'decay', 'change', 'transformation',
+        # Materials & surfaces
+        'metal', 'rust', 'gold', 'silver', 'copper', 'chrome', 'marble',
+        'granite', 'sand', 'gravel', 'dirt', 'mud', 'clay', 'fabric',
+        'leather', 'paper', 'cardboard', 'plastic', 'rubber', 'wax',
+        # Misc high-coverage
+        'cinematic', 'vintage', 'retro', 'futuristic', 'minimalist', 'luxury',
+        'grunge', 'urban decay', 'abandoned', 'ruins', 'wreck', 'junkyard',
+        'graffiti', 'neon sign', 'billboard', 'flag', 'clock', 'compass',
+        'map', 'globe', 'chain', 'rope', 'wire', 'fence', 'gate', 'lock',
+        'key', 'candle', 'flame', 'lantern', 'lamp', 'chandelier', 'window light',
+        'shadow play', 'silhouette', 'backlit', 'golden hour', 'blue hour',
+        'overcast', 'cloudy', 'sunny', 'rainy', 'snowy', 'windy', 'calm',
+        'peaceful', 'chaotic', 'crowded', 'empty', 'lonely', 'isolated',
+        'remote', 'hidden', 'secret', 'mysterious', 'dark', 'bright',
+        'colorful', 'monochrome', 'black and white', 'sepia', 'warm', 'cool',
+        'soft', 'sharp', 'blurry', 'crisp', 'smooth', 'rough', 'wet', 'dry',
+    ]
+
+    def _graphql_paginate(self, graphql_templates, thumb_dir):
+        """
+        Concurrent multi-strategy GraphQL pagination.
+        Uses ThreadPoolExecutor for parallel queries, defers thumbnail downloads.
+        """
+        import time
+        import urllib.request
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        if not graphql_templates:
+            return []
+
+        tpl = graphql_templates[0] if isinstance(graphql_templates[0], dict) else graphql_templates[0]
+        gql_url = tpl.get('url', 'https://search-api.artlist.io/v1/graphql')
+        gql_query = tpl.get('query', '')
+        gql_vars = dict(tpl.get('variables', {}))
+        gql_op = tpl.get('operation', '')
+        gql_headers = dict(tpl.get('headers', {}))
+
+        if not gql_query:
+            self.log("  No GraphQL query captured.", "WARN")
+            return []
+
+        self.log(f"  Endpoint: {gql_url}", "INFO")
+        self.log(f"  Operation: {gql_op or '(unnamed)'}", "INFO")
+        self.log(f"  Variables: {list(gql_vars.keys())}", "INFO")
+        self.log(f"  Search terms: {len(self.SEARCH_TERMS)}", "INFO")
+
+        # Build request headers
+        req_headers = dict(self.HEADERS)
+        req_headers['Content-Type'] = 'application/json'
+        req_headers['Accept'] = 'application/json'
+        if gql_headers:
+            for k, v in gql_headers.items():
+                if k.lower() not in ('host', 'content-length', 'connection',
+                                      'accept-encoding', 'user-agent', 'accept',
+                                      'content-type'):
+                    req_headers[k] = v
+
+        # ── Thread-safe shared state ──────────────────────────────────────
+        import threading
+        state_lock = threading.Lock()  # single lock for ALL shared state
+        seen_ids = set()
+        total_new = [0]
+        total_api = [0]
+        rate_backoff_until = [0.0]  # timestamp when rate limit expires
+
+        max_pages = 40  # API caps at ~33
+        workers = self.cfg.get('concurrent_workers', 6)
+
+        def _gql_post(vars_dict):
+            """Single GraphQL POST. Returns parsed clips list or empty."""
+            if self._stop.is_set():
+                return []
+
+            # Global rate-limit backoff
+            now = time.time()
+            with state_lock:
+                wait_until = rate_backoff_until[0]
+            if now < wait_until:
+                time.sleep(wait_until - now + random.uniform(0.5, 2))
+
+            payload = json.dumps({
+                'query': gql_query,
+                'variables': vars_dict,
+                'operationName': gql_op or None,
+            }).encode('utf-8')
+
+            try:
+                req = urllib.request.Request(gql_url, data=payload,
+                                             headers=req_headers, method='POST')
+                resp = urllib.request.urlopen(req, timeout=15)
+                body = resp.read(5_000_000)
+                resp.close()
+                if resp.headers.get('Content-Encoding') == 'gzip':
+                    import gzip
+                    body = gzip.decompress(body)
+                data = json.loads(body)
+                with state_lock:
+                    total_api[0] += 1
+                return self._walk_for_clips(data)
+            except Exception as e:
+                err = str(e)
+                if '403' in err or '429' in err:
+                    with state_lock:
+                        rate_backoff_until[0] = time.time() + 30
+                return []
+
+        def _run_query(label, var_overrides):
+            """Paginate one query. Save to DB immediately, no thumbnails."""
+            new_count = 0
+            api_empty = 0      # API returned 0 clips (catalog exhausted)
+            all_dupes = 0      # API returned clips but all already seen
+
+            for pg in range(1, max_pages + 1):
+                if self._stop.is_set():
+                    break
+
+                v = json.loads(json.dumps(gql_vars))
+                v.update(var_overrides)
+                v['page'] = pg
+
+                found = _gql_post(v)
+
+                if not found:
+                    # API returned zero clips — truly empty page
+                    api_empty += 1
+                    if api_empty >= 2:
+                        break
+                    continue
+
+                # API returned clips — reset api_empty counter
+                api_empty = 0
+
+                # Deduplicate against global seen set
+                with state_lock:
+                    fresh = [c for c in found
+                             if c.get('clip_id') and c['clip_id'] not in seen_ids]
+                    for c in fresh:
+                        seen_ids.add(c['clip_id'])
+
+                if fresh:
+                    new_count += len(fresh)
+                    all_dupes = 0
+                    # Save to DB immediately (thread-safe via _db_lock)
+                    for c in fresh:
+                        c.setdefault('source_site', 'Artlist')
+                        self._save_clip_meta(c)
+                else:
+                    # All clips on this page were already seen
+                    all_dupes += 1
+                    if all_dupes >= 10:
+                        # 10 consecutive pages of pure overlap — move on
+                        break
+
+                time.sleep(random.uniform(0.12, 0.30))
+
+            # Update global counter
+            with state_lock:
+                total_new[0] += new_count
+
+            return label, new_count
+
+        # ══════════════════════════════════════════════════════════════════
+        # Build job queue
+        # ══════════════════════════════════════════════════════════════════
+        jobs = []
+
+        # Sort rotations
+        default_sort = gql_vars.get('sortType', 0)
+        for sv in [default_sort, 1, 2, 3, 4, 5]:
+            lbl = 'default' if sv == default_sort else f'sort-{sv}'
+            jobs.append((lbl, {'sortType': sv}))
+
+        # AI content toggle
+        if 'includeAIContent' in gql_vars and not gql_vars.get('includeAIContent'):
+            for sv in [default_sort, 1, 2, 3]:
+                jobs.append((f'ai-sort{sv}', {'includeAIContent': True, 'sortType': sv}))
+
+        # queryType exploration (0-9)
+        if 'queryType' in gql_vars:
+            dqt = gql_vars.get('queryType', 0)
+            for qt in range(10):
+                if qt != dqt:
+                    jobs.append((f'qtype-{qt}', {'queryType': qt}))
+
+        # Search terms (deduplicated)
+        used = set()
+        for term in self.SEARCH_TERMS:
+            if term in used:
+                continue
+            used.add(term)
+            jobs.append((f's:{term}', {'searchTerms': [term]}))
+
+        # Search + AI content (separate pass, only unique terms)
+        if 'includeAIContent' in gql_vars and not gql_vars.get('includeAIContent'):
+            used2 = set()
+            for term in self.SEARCH_TERMS:
+                if term in used2:
+                    continue
+                used2.add(term)
+                jobs.append((f's:{term}+ai', {'searchTerms': [term], 'includeAIContent': True}))
+
+        # Search + sort combinations for top terms (maximizes unique results)
+        top_terms = [
+            'nature', 'city', 'people', 'water', 'sky', 'forest', 'ocean',
+            'mountain', 'sunset', 'night', 'animal', 'drone', 'aerial',
+            'technology', 'business', 'abstract', 'timelapse', 'slow motion',
+            'food', 'car', 'fire', 'space', 'underwater', 'rain', 'snow',
+        ]
+        for term in top_terms:
+            for sv in [1, 2, 3]:
+                if sv == default_sort:
+                    continue
+                jobs.append((f's:{term}/s{sv}', {'searchTerms': [term], 'sortType': sv}))
+
+        self.log(f"  Jobs queued: {len(jobs)}", "OK")
+        self.log(f"  Workers: {workers}", "INFO")
+        self.log(f"  Thumbnails: deferred (metadata-only scrape)", "INFO")
+        self.log("", "INFO")
+
+        # ══════════════════════════════════════════════════════════════════
+        # Execute
+        # ══════════════════════════════════════════════════════════════════
+        completed = 0
+        t_start = time.time()
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_map = {}
+            for lbl, ovr in jobs:
+                if self._stop.is_set():
+                    break
+                future_map[executor.submit(_run_query, lbl, ovr)] = lbl
+
+            for fut in as_completed(future_map):
+                if self._stop.is_set():
+                    executor.shutdown(wait=False)
+                    break
+                try:
+                    label, count = fut.result(timeout=180)
+                except Exception:
+                    label, count = future_map.get(fut, '?'), 0
+
+                completed += 1
+
+                if count > 0:
+                    with state_lock:
+                        t = total_new[0]
+                        a = total_api[0]
+                    self.log(
+                        f"  [{completed}/{len(jobs)}] {label}: +{count:,} "
+                        f"(total: {t:,}, calls: {a})", "OK")
+
+                # Progress summary
+                if completed % 25 == 0:
+                    with state_lock:
+                        t = total_new[0]
+                        a = total_api[0]
+                    elapsed = time.time() - t_start
+                    rate = t / elapsed * 60 if elapsed > 0 else 0
+                    self.log(
+                        f"  --- {completed}/{len(jobs)} jobs | "
+                        f"{t:,} clips | {a} calls | "
+                        f"{rate:,.0f} clips/min | "
+                        f"{elapsed:.0f}s elapsed ---", "M3U8")
+                    self.stats_signal.emit(self.db.stats())
+
+        # ══════════════════════════════════════════════════════════════════
+        # Thumbnail download pass (after all metadata scraped)
+        # ══════════════════════════════════════════════════════════════════
+        with state_lock:
+            final_total = total_new[0]
+            final_api = total_api[0]
+
+        elapsed = time.time() - t_start
+        self.log("", "INFO")
+        self.log(f"  Metadata scrape complete: {final_total:,} clips, "
+                 f"{final_api} API calls, {elapsed:.0f}s", "OK")
+        self.stats_signal.emit(self.db.stats())
+
+        # Download thumbnails in parallel (non-blocking, best-effort)
+        self.log(f"  Downloading thumbnails for {final_total:,} clips...", "INFO")
+        thumb_count = [0]
+
+        def _dl_thumb(clip_id, url):
+            if self._stop.is_set():
+                return
+            out = os.path.join(thumb_dir, f"{clip_id}.jpg")
+            if os.path.isfile(out) and os.path.getsize(out) > 0:
+                return
+            try:
+                req = urllib.request.Request(url)
+                req.add_header('User-Agent', 'Mozilla/5.0')
+                resp = urllib.request.urlopen(req, timeout=8)
+                data = resp.read(2_000_000)
+                resp.close()
+                if len(data) > 500:
+                    with open(out, 'wb') as f:
+                        f.write(data)
+                    with self._db_lock:
+                        self.db.update_thumb_path(clip_id, out)
+                    with state_lock:
+                        thumb_count[0] += 1
+            except Exception:
+                pass
+
+        # Get all clips needing thumbnails from DB
+        try:
+            cur = self.db.conn.execute(
+                "SELECT clip_id, thumbnail_url FROM clips "
+                "WHERE thumbnail_url != '' AND thumbnail_url IS NOT NULL "
+                "AND (thumb_path IS NULL OR thumb_path = '')")
+            thumb_jobs = cur.fetchall()
+        except Exception:
+            thumb_jobs = []
+
+        if thumb_jobs:
+            self.log(f"  {len(thumb_jobs):,} thumbnails to download...", "INFO")
+            with ThreadPoolExecutor(max_workers=10) as tex:
+                futs = []
+                for cid, turl in thumb_jobs:
+                    if self._stop.is_set():
+                        break
+                    futs.append(tex.submit(_dl_thumb, cid, turl))
+                # Wait with progress
+                done = 0
+                for f in as_completed(futs):
+                    done += 1
+                    if done % 500 == 0:
+                        with state_lock:
+                            tc = thumb_count[0]
+                        self.log(f"    Thumbnails: {tc:,} downloaded ({done:,}/{len(thumb_jobs):,} processed)", "INFO")
+                    if self._stop.is_set():
+                        tex.shutdown(wait=False)
+                        break
+            with state_lock:
+                tc = thumb_count[0]
+            self.log(f"  Thumbnails complete: {tc:,} downloaded", "OK")
+        self.stats_signal.emit(self.db.stats())
+
+        return []  # clips already saved to DB; no need to return list
+
+    def _ingest_clips(self, clips, thumb_dir, source_label):
+        """Save a batch of clip dicts to DB, download thumbs. Returns (new, updated)."""
+        new_count = 0
+        upd_count = 0
+        for clip in clips:
+            if self._stop.is_set():
+                break
+            clip.setdefault('source_site', 'Artlist')
+            is_new = self._save_clip_meta(clip)
+            if is_new:
+                new_count += 1
+            else:
+                upd_count += 1
+            # Download thumbnail
+            thumb_url = clip.get('thumbnail_url', '')
+            clip_id = clip.get('clip_id', '')
+            if thumb_url and clip_id:
+                self._download_thumb(thumb_url, clip_id, thumb_dir)
+
+        self.log(f"  [{source_label}] Ingested {new_count} new + {upd_count} updated clips", "OK" if new_count else "INFO")
+        self.stats_signal.emit(self.db.stats())
+        return new_count, upd_count
+
+    # ── Phase 1: Sitemaps ─────────────────────────────────────────────────────
+
+    def _check_sitemaps(self):
+        """Check robots.txt and sitemap.xml for clip URLs."""
+        clips = []
+
+        # Try robots.txt for sitemap references
+        self.log("  Fetching robots.txt...", "DEBUG")
+        code, body = self._http_get('https://artlist.io/robots.txt')
+        sitemap_urls = []
+        if code == 200 and body:
+            text = body.decode('utf-8', errors='replace')
+            self.log(f"  robots.txt: {len(text)} bytes", "INFO")
+            for line in text.splitlines():
+                if line.lower().startswith('sitemap:'):
+                    sm_url = line.split(':', 1)[1].strip()
+                    sitemap_urls.append(sm_url)
+                    self.log(f"  Found sitemap: {sm_url}", "M3U8")
+
+        # Try common sitemap URLs
+        for url in ['https://artlist.io/sitemap.xml',
+                     'https://artlist.io/sitemap-index.xml',
+                     'https://artlist.io/sitemaps/sitemap.xml'] + sitemap_urls:
+            if self._stop.is_set():
+                break
+            self.log(f"  Fetching {url}...", "DEBUG")
+            code, body = self._http_get(url, timeout=20)
+            if code == 200 and body:
+                text = body.decode('utf-8', errors='replace')
+                self.log(f"  Sitemap response: {len(text)} bytes", "INFO")
+
+                # Extract clip URLs from sitemap XML
+                clip_urls = re.findall(
+                    r'<loc>(https?://artlist\.io/stock-footage/clip/[^<]+)</loc>', text)
+                self.log(f"  Found {len(clip_urls)} clip URLs in sitemap", "OK" if clip_urls else "INFO")
+
+                for curl in clip_urls:
+                    if self._stop.is_set():
+                        break
+                    cid_m = re.search(r'/(\d{4,})/?$', curl)
+                    if cid_m:
+                        slug_m = re.search(r'/clip/([^/]+)/', curl)
+                        title = slug_m.group(1).replace('-', ' ').title() if slug_m else ''
+                        clips.append({
+                            'clip_id': cid_m.group(1),
+                            'source_url': curl,
+                            'title': title,
+                            'source_site': 'Artlist',
+                        })
+
+                # Check for sub-sitemaps (sitemap index)
+                sub_sitemaps = re.findall(r'<loc>(https?://[^<]*sitemap[^<]*\.xml[^<]*)</loc>', text)
+                for sub_url in sub_sitemaps[:20]:  # cap at 20
+                    if self._stop.is_set():
+                        break
+                    if 'footage' in sub_url.lower() or 'clip' in sub_url.lower() or 'video' in sub_url.lower():
+                        self.log(f"  Fetching sub-sitemap: {sub_url[:80]}", "INFO")
+                        sc, sb = self._http_get(sub_url, timeout=30)
+                        if sc == 200 and sb:
+                            st = sb.decode('utf-8', errors='replace')
+                            sub_clips = re.findall(
+                                r'<loc>(https?://artlist\.io/stock-footage/clip/[^<]+)</loc>', st)
+                            self.log(f"  Sub-sitemap: {len(sub_clips)} clip URLs", "OK" if sub_clips else "INFO")
+                            for curl in sub_clips:
+                                cid_m = re.search(r'/(\d{4,})/?$', curl)
+                                if cid_m:
+                                    slug_m = re.search(r'/clip/([^/]+)/', curl)
+                                    title = slug_m.group(1).replace('-', ' ').title() if slug_m else ''
+                                    clips.append({
+                                        'clip_id': cid_m.group(1),
+                                        'source_url': curl,
+                                        'title': title,
+                                        'source_site': 'Artlist',
+                                    })
+
+        if clips:
+            self.log(f"  Sitemaps total: {len(clips)} clip URLs", "OK")
+        else:
+            self.log("  No clip URLs found in sitemaps (site may not expose them).", "WARN")
+        return clips
+
+    # ── Phase 2: __NEXT_DATA__ from catalog page ──────────────────────────────
+
+    def _fetch_next_data_catalog(self):
+        """Fetch the catalog page HTML and extract __NEXT_DATA__ JSON."""
+        clips = []
+        build_id = ''
+
+        self.log("  Fetching https://artlist.io/stock-footage ...", "INFO")
+        code, body = self._http_get('https://artlist.io/stock-footage', timeout=20)
+        if code != 200:
+            self.log(f"  HTTP {code} — catalog page not accessible without JS rendering", "WARN")
+            return clips, build_id
+
+        html = body.decode('utf-8', errors='replace')
+        self.log(f"  Response: {len(html):,} bytes", "INFO")
+
+        # Extract __NEXT_DATA__
+        nd_match = re.search(
+            r'<script\s+id="__NEXT_DATA__"\s+type="application/json"[^>]*>(.*?)</script>',
+            html, re.DOTALL)
+        if not nd_match:
+            self.log("  __NEXT_DATA__ not found in HTML", "WARN")
+            # Try fetching a specific clip page instead
+            self.log("  Trying a clip page for __NEXT_DATA__...", "INFO")
+            code2, body2 = self._http_get(
+                'https://artlist.io/stock-footage/clip/buildings-traffic-new-york-usa/6451306', timeout=20)
+            if code2 == 200:
+                html = body2.decode('utf-8', errors='replace')
+                nd_match = re.search(
+                    r'<script\s+id="__NEXT_DATA__"\s+type="application/json"[^>]*>(.*?)</script>',
+                    html, re.DOTALL)
+
+        if nd_match:
+            try:
+                nd_json = json.loads(nd_match.group(1))
+                build_id = nd_json.get('buildId', '')
+                self.log(f"  buildId: {build_id}", "M3U8" if build_id else "WARN")
+                self.log(f"  page: {nd_json.get('page', 'N/A')}", "INFO")
+                self.log(f"  JSON size: {len(nd_match.group(1)):,} bytes", "INFO")
+
+                if build_id:
+                    cfg = load_config()
+                    cfg['artlist_build_id'] = build_id
+                    save_config(cfg)
+
+                # Walk the entire __NEXT_DATA__ for clip objects
+                found = self._walk_for_clips(nd_json)
+                self.log(f"  Found {len(found)} clips in __NEXT_DATA__", "OK" if found else "INFO")
+                clips.extend(found)
+
+            except json.JSONDecodeError as e:
+                self.log(f"  __NEXT_DATA__ JSON parse error: {e}", "WARN")
+        else:
+            self.log("  __NEXT_DATA__ not found on any page (may require JS rendering)", "WARN")
+
+        return clips, build_id
+
+    # ── Phase 3: _next/data API ───────────────────────────────────────────────
+
+    def _fetch_next_data_api(self, build_id):
+        """Try Next.js _next/data/{buildId}/ JSON endpoints for paginated data."""
+        clips = []
+        if not build_id:
+            return clips
+
+        # Try various _next/data paths that Next.js might expose
+        paths_to_try = [
+            '/stock-footage.json',
+            '/stock-footage/index.json',
+            '/stock-footage.json?page=1',
+            '/stock-footage.json?offset=0&limit=50',
+        ]
+
+        for path in paths_to_try:
+            if self._stop.is_set():
+                break
+            url = f'https://artlist.io/_next/data/{build_id}{path}'
+            self.log(f"  Trying: {url[:80]}", "DEBUG")
+            data = self._http_get_json(url)
+            if data:
+                self.log(f"  Got JSON response! Keys: {list(data.keys())[:10]}", "M3U8")
+                found = self._walk_for_clips(data)
+                if found:
+                    self.log(f"  Found {len(found)} clips", "OK")
+                    clips.extend(found)
+
+                    # Try pagination
+                    page_num = 2
+                    while page_num <= 100 and not self._stop.is_set():
+                        page_url = f'https://artlist.io/_next/data/{build_id}/stock-footage.json?page={page_num}'
+                        pdata = self._http_get_json(page_url)
+                        if not pdata:
+                            break
+                        pfound = self._walk_for_clips(pdata)
+                        if not pfound:
+                            break
+                        clips.extend(pfound)
+                        self.log(f"  Page {page_num}: +{len(pfound)} clips (total: {len(clips)})", "INFO")
+                        page_num += 1
+                    break  # Found a working path, don't try others
+            else:
+                self.log(f"  No response from {path}", "DEBUG")
+
+        if not clips:
+            self.log("  _next/data endpoints did not return clip data.", "WARN")
+            self.log("  This is normal if Artlist uses client-side API calls instead.", "INFO")
+
+        return clips
+
+    # ── Phase 4: Clip ID probing ──────────────────────────────────────────────
+
+    def _probe_clip_ids(self, build_id=''):
+        """Probe clip IDs via _next/data JSON endpoints. Requires buildId."""
+        clips = []
+        import time
+
+        if not build_id:
+            self.log("  No buildId — cannot probe. Run browser bootstrap or API Discovery first.", "WARN")
+            return clips
+
+        # Determine ID range to probe
+        try:
+            row = self.db.execute(
+                "SELECT MAX(CAST(clip_id AS INTEGER)) as max_id FROM clips WHERE clip_id != ''"
+            ).fetchone()
+            known_max = int(row['max_id'] or 0) if row else 0
+        except Exception:
+            known_max = 0
+
+        # Seed IDs from web search results + DB
+        seed_ids = [6590530, 6451306, 6374774, 6015761, 486409]
+        max_known = max(seed_ids + [known_max])
+
+        self.log(f"  buildId: {build_id}", "INFO")
+        self.log(f"  DB max clip ID: {known_max}  |  Seed max: {max_known}", "INFO")
+
+        # First: quick connectivity test with a known-good ID
+        test_url = f'https://artlist.io/_next/data/{build_id}/stock-footage/clip/x/6451306.json'
+        test_data = self._http_get_json(test_url, timeout=10)
+        if not test_data:
+            # BuildId may be stale — _next/data 404s when buildId changes on deploy
+            self.log("  _next/data returned nothing for known clip — buildId may be stale.", "WARN")
+            self.log("  Try running API Discovery or Direct HTTP again to refresh buildId.", "WARN")
+            return clips
+
+        test_clips = self._walk_for_clips(test_data)
+        if test_clips:
+            clips.extend(test_clips)
+            self.log(f"  Connectivity test OK: got clip data for ID 6451306", "OK")
+        else:
+            self.log("  _next/data returned JSON but no clip data — endpoint may have changed.", "WARN")
+            return clips
+
+        # Probe strategy: scan downward from max known ID
+        start_id = max_known + 500  # Check a bit above max in case new clips were added
+        max_probes = self.cfg.get('max_pages', 500) or 500
+        max_gap = 50       # consecutive misses before jumping
+        jump_size = 5000   # how far to jump on a gap
+        max_jumps = 20     # stop after this many jumps with no data
+        min_id = 100000    # don't go below this
+
+        self.log(f"  Probing {max_probes} IDs from {start_id} downward...", "INFO")
+
+        probe_count = 0
+        consecutive_miss = 0
+        jump_count = 0
+        current_id = start_id
+        thumb_dir = os.path.join(
+            os.environ.get('APPDATA', os.path.expanduser('~')),
+            'ArtlistScraper', 'thumbnails')
+
+        while probe_count < max_probes and not self._stop.is_set():
+            if consecutive_miss >= max_gap:
+                jump_count += 1
+                if jump_count > max_jumps or current_id - jump_size < min_id:
+                    self.log(f"  Reached probe limit after {jump_count} jumps", "INFO")
+                    break
+                current_id -= jump_size
+                consecutive_miss = 0
+                self.log(f"  Gap detected — jumping to ID {current_id}", "DEBUG")
+                continue
+
+            probe_count += 1
+            url = f'https://artlist.io/_next/data/{build_id}/stock-footage/clip/x/{current_id}.json'
+            data = self._http_get_json(url, timeout=8)
+
+            if data:
+                found = self._walk_for_clips(data)
+                if found:
+                    clips.extend(found)
+                    consecutive_miss = 0
+                    jump_count = max(0, jump_count - 1)  # Successful hits reduce jump count
+                else:
+                    consecutive_miss += 1
+            else:
+                consecutive_miss += 1
+
+            current_id -= 1
+
+            # Rate limiting: ~10 req/sec
+            if probe_count % 10 == 0:
+                time.sleep(0.5)
+
+            # Progress + incremental save
+            if probe_count % 100 == 0:
+                self.log(
+                    f"  Progress: {probe_count}/{max_probes} probed, {len(clips)} found, "
+                    f"at ID {current_id}, gaps: {jump_count}", "INFO")
+                # Save batch to DB
+                for c in clips[-100:]:
+                    c.setdefault('source_site', 'Artlist')
+                    self._save_clip_meta(c)
+                    if c.get('thumbnail_url') and c.get('clip_id'):
+                        self._download_thumb(c['thumbnail_url'], c['clip_id'], thumb_dir)
+                self.stats_signal.emit(self.db.stats())
+
+        self.log(f"  ID probing done: {probe_count} probed, {len(clips)} clips found", "OK" if clips else "WARN")
+        return clips
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN WINDOW
@@ -4282,7 +6281,7 @@ class MainWindow(QMainWindow):
         self._dl_worker      = None   # DownloadWorker instance
         self._db_path        = os.path.join(get_config_dir(), 'artlist_results.db')
 
-        self.setWindowTitle("Video Scraper  v1.1.0")
+        self.setWindowTitle("Video Scraper  v1.4.0")
         self.setMinimumSize(Z(960), Z(600))
         self.resize(Z(1400), Z(860))
 
@@ -4747,6 +6746,31 @@ class MainWindow(QMainWindow):
             ll.setAlignment(Qt.AlignmentFlag.AlignCenter)
             cl.addWidget(lv); cl.addWidget(ll); setattr(self, attr, lv); cards.addWidget(card)
         lay.addLayout(cards)
+
+        # ── Crawl Mode selector ─────────────────────────────────────────
+        mode_row = QHBoxLayout(); mode_row.setSpacing(Z(8))
+        mode_lbl = QLabel("Crawl Mode:")
+        mode_lbl.setStyleSheet(f"color:{C('text_muted')}; font-size:{Z(11)}px; font-weight:600; background:transparent;")
+        mode_row.addWidget(mode_lbl)
+
+        self.combo_crawl_mode = QComboBox()
+        self.combo_crawl_mode.setFixedHeight(Z(30))
+        self.combo_crawl_mode.setMinimumWidth(Z(220))
+        self.combo_crawl_mode.addItem("Full Crawl  (metadata + M3U8)", "full")
+        self.combo_crawl_mode.addItem("Catalog Sweep  (fast metadata only)", "catalog_sweep")
+        self.combo_crawl_mode.addItem("M3U8 Harvest  (enrich existing clips)", "m3u8_only")
+        self.combo_crawl_mode.addItem("API Discovery  (find endpoints)", "api_discover")
+        self.combo_crawl_mode.addItem("Direct HTTP  (no browser, fastest)", "direct_http")
+        self.combo_crawl_mode.setToolTip(
+            "Full Crawl: visits every clip page for complete data + M3U8 streams.\n"
+            "Catalog Sweep: only browses listing pages — bulk-extracts from card grids.\n"
+            "M3U8 Harvest: visits clips already in DB that are missing M3U8 URLs.\n"
+            "API Discovery: one-time browser session to find Artlist's internal API endpoints.\n"
+            "Direct HTTP: fastest — no browser at all. Uses sitemaps, __NEXT_DATA__,\n"
+            "  _next/data endpoints, and clip ID probing for bulk metadata.")
+        mode_row.addWidget(self.combo_crawl_mode)
+        mode_row.addStretch()
+        lay.addLayout(mode_row)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0,0); self.progress_bar.setFixedHeight(Z(5))
@@ -6171,6 +8195,9 @@ class MainWindow(QMainWindow):
         # Clipboard monitor state
         if hasattr(self, '_clipboard_timer'):
             cfg['clipboard_monitor'] = self._clipboard_timer.isActive()
+        # Crawl mode
+        if hasattr(self, 'combo_crawl_mode'):
+            cfg['crawl_mode'] = self.combo_crawl_mode.currentData() or 'full'
         # Filename template
         if hasattr(self, 'inp_fn_template'):
             cfg['fn_template'] = self.inp_fn_template.text().strip() or '{title}'
@@ -6223,14 +8250,61 @@ class MainWindow(QMainWindow):
     def _start_crawl(self):
         if self.worker and self.worker.isRunning(): return
 
-        # Pre-flight: verify browser is installed
+        cfg = self._collect_config()
+        # Merge with existing config (preserve artlist_graphql, artlist_build_id, etc.)
+        existing = load_config() or {}
+        existing.update(cfg)
+        cfg = existing
+        save_config(cfg)
+        mode = cfg.get('crawl_mode', 'full')
+
+        # Direct HTTP mode doesn't need a browser at all
+        if mode == 'direct_http':
+            mode_label = 'Direct HTTP'
+            self._on_log(f"Starting {mode_label} — no browser needed", "INFO")
+            self.worker = DirectScrapeWorker(cfg, self.db, mode='direct_http')
+            self.worker.log_signal.connect(self._on_log)
+            self.worker.stats_signal.connect(self._on_stats)
+            self.worker.clip_signal.connect(self._on_clip_found)
+            self.worker.status_signal.connect(self._on_status)
+            self.worker.finished.connect(self._on_finished)
+            self.worker.start()
+            self.btn_start.setEnabled(False)
+            self.btn_pause.setEnabled(False)  # No pause for HTTP mode
+            self.btn_stop.setEnabled(True)
+            self.progress_bar.setVisible(True)
+            self.tabs.setCurrentIndex(1)
+            return
+
+        # API Discovery needs browser but not the full crawl loop
+        if mode == 'api_discover':
+            if not _chromium_is_ready():
+                self._check_browser_status()
+                self._on_log("Cannot start: Chromium browser not installed. Click 'Install Browser'.", "ERROR")
+                return
+            mode_label = 'API Discovery'
+            self._on_log(f"Starting {mode_label}...", "INFO")
+            self.worker = DirectScrapeWorker(cfg, self.db, mode='api_discover')
+            self.worker.log_signal.connect(self._on_log)
+            self.worker.stats_signal.connect(self._on_stats)
+            self.worker.clip_signal.connect(self._on_clip_found)
+            self.worker.status_signal.connect(self._on_status)
+            self.worker.finished.connect(self._on_finished)
+            self.worker.start()
+            self.btn_start.setEnabled(False)
+            self.btn_pause.setEnabled(False)
+            self.btn_stop.setEnabled(True)
+            self.progress_bar.setVisible(True)
+            self.tabs.setCurrentIndex(1)
+            return
+
+        # All other modes need browser
         if not _chromium_is_ready():
             self._check_browser_status()
             self._on_log(
                 "Cannot start: Chromium browser not installed. Click 'Install Browser'.", "ERROR")
             return
 
-        cfg = self._collect_config(); save_config(cfg)
         active_profiles = []
         if hasattr(self, '_profile_checks'):
             for name, chk in self._profile_checks.items():
@@ -6241,7 +8315,11 @@ class MainWindow(QMainWindow):
             active_profiles = [self._get_active_profile()]
         self._active_profile = active_profiles[0]
         names = ', '.join(p.name for p in active_profiles)
-        self._on_log(f"Starting with profiles: {names} (batch={cfg.get('batch_size', 50)})", "INFO")
+        mode_label = {
+            'full': 'Full Crawl', 'catalog_sweep': 'Catalog Sweep',
+            'm3u8_only': 'M3U8 Harvest',
+        }.get(mode, mode)
+        self._on_log(f"Starting {mode_label} with profiles: {names} (batch={cfg.get('batch_size', 50)})", "INFO")
         self.worker = CrawlerWorker(cfg, self.db, profiles=active_profiles)
         self.worker.log_signal.connect(self._on_log)
         self.worker.stats_signal.connect(self._on_stats)
@@ -7195,6 +9273,12 @@ class MainWindow(QMainWindow):
                     self._zoom_combo.blockSignals(True)
                     self._zoom_combo.setCurrentIndex(i)
                     self._zoom_combo.blockSignals(False)
+                    break
+        # Crawl mode
+        if 'crawl_mode' in cfg and hasattr(self, 'combo_crawl_mode'):
+            for i in range(self.combo_crawl_mode.count()):
+                if self.combo_crawl_mode.itemData(i) == cfg['crawl_mode']:
+                    self.combo_crawl_mode.setCurrentIndex(i)
                     break
 
     def _browse_output(self):
