@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # Video Scraper v1.4.0
 # Headless crawler with PyQt6 GUI — full metadata + keyword search + download manager
 # Phase 1-3: Search quality, thumbnail pipeline, card/grid view
