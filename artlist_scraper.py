@@ -10,6 +10,7 @@
 #          parsing, URL slug titles, Load More pagination, CDN domain filter),
 #          BackgroundWorker for non-blocking exports, search debouncing,
 #          auto-metadata from video filenames (resolution/fps/clip_id),
+from pathlib import Path
 #          generic h1 skip patterns, video element DOM observer
 # v0.6.0: Multi-site support with Site Profile system (Artlist, Pexels, Pixabay,
 #          Storyblocks, Generic), expanded video detection (M3U8, MP4, WebM, DASH,
@@ -72,11 +73,31 @@
 
 import sys, os, subprocess, traceback, re, random, shutil
 
+
+# codex-branding:start
+def _branding_icon_path() -> Path:
+    candidates = []
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).resolve().parent
+        candidates.append(exe_dir / "icon.png")
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(Path(meipass) / "icon.png")
+    current = Path(__file__).resolve()
+    candidates.extend([current.parent / "icon.png", current.parent.parent / "icon.png", current.parent.parent.parent / "icon.png"])
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return Path("icon.png")
+# codex-branding:end
+
+
 # Hide console window on Windows immediately (before any prints)
 if sys.platform == 'win32':
     try:
         import ctypes as _ct
         _hw = _ct.windll.kernel32.GetConsoleWindow()
+        _hw.setWindowIcon(branding_icon)
         if _hw:
             _ct.windll.user32.ShowWindow(_hw, 0)  # SW_HIDE
         del _ct, _hw
@@ -195,7 +216,7 @@ from PyQt6.QtCore import (
     Qt, QThread, pyqtSignal, QTimer, QSize, QRect, QPoint, QUrl,
     QPropertyAnimation, QEasingCurve
 )
-from PyQt6.QtGui import (
+from PyQt6.QtGui import (, QIcon
     QColor, QTextCursor, QPixmap, QPainter, QBrush, QFont,
     QKeySequence, QShortcut, QAction, QIcon
 )
@@ -9373,6 +9394,8 @@ if __name__ == '__main__':
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.RoundPreferFloor)
     app = QApplication(sys.argv)
+    branding_icon = QIcon(str(_branding_icon_path()))
+    app.setWindowIcon(branding_icon)
     _init_dpi()
 
     # Set default app font to prevent QFont::setPointSize(-1) warnings
