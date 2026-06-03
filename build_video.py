@@ -226,11 +226,7 @@ def make_seg(src, dst, duration, start_offset=0.0, ken_burns=False, zpunch_t=Non
         f"pad=1280:720:(ow-iw)/2:(oh-ih)/2:black",
         f"setsar=1"
     ]
-    if ken_burns:
-        frames = int(duration * 30)
-        vf_parts.append(
-            f"zoompan=z='min(zoom+0.0008,{KEN_ZOOM})':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={frames}:s=1280x720:fps=30"
-        )
+    # Ken Burns (zoompan) skipped — freezes video input on first frame
     if zpunch_t is not None and 0 < zpunch_t < duration - ZPUNCH_DUR:
         zs = int(zpunch_t * 30)
         zd = int(ZPUNCH_DUR * 30)
@@ -508,8 +504,8 @@ for i, clip in enumerate(CLIPS):
     # ── Step 2: best offset within clip ───────────────────────────────────
     best_t, best_s = best_offset(raw_p, desc, dur, actual_dur)
 
-    # Ken Burns on clips with low motion score (heuristic: score < 0.55)
-    kb = best_s < 0.55
+    # Ken Burns disabled — zoompan freezes video clips on first frame
+    kb = False
 
     print(f"[{i:3d}] scene={clip['scene']:2d}  {clip['start']:.1f}-{clip['end']:.1f}s  "
           f"src={actual_dur:.0f}s  off={best_t:.1f}s  CLIP={best_s:.3f}  "
