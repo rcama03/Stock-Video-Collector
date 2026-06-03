@@ -50,8 +50,6 @@ KEN_ZOOM      = 1.05
 ZPUNCH_SCALE  = 1.10
 ZPUNCH_DUR    = 0.3
 
-CTA_TEXT      = "Abonnieren & Keine Folge Verpassen!"
-CTA_BTN_TEXT  = "ABONNIEREN"
 CTA_POSITIONS = [0.25, 0.50, 0.75]
 CTA_DURATION  = 1.5   # seconds
 
@@ -247,69 +245,74 @@ def make_seg(src, dst, duration, start_offset=0.0, ken_burns=False, zpunch_t=Non
 FONT_REG  = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
+CTA_TEXT     = "Verpasse Keine Folge"
+CTA_BTN_TEXT = "ABONNIEREN"
+CTA_STRIP_Y  = 560   # vertical position of strip in 720p frame
+
 def make_cta_overlay_png():
-    """Generate transparent CTA strip PNG (bottom third of frame)."""
+    """Generate fully transparent CTA strip PNG — text + button on single line."""
     png = f"{CTADIR}/cta_overlay.png"
     if os.path.exists(png):
         return png
 
-    # Strip covers bottom 160px of 720p frame
-    strip_h = 160
+    strip_h = 100
     img = Image.new("RGBA", (1280, strip_h), (0, 0, 0, 0))
     d   = ImageDraw.Draw(img)
 
-    # Semi-transparent dark background
-    d.rectangle([0, 0, 1280, strip_h], fill=(0, 0, 0, 185))
+    font  = ImageFont.truetype(FONT_REG,  38)
+    bfont = ImageFont.truetype(FONT_BOLD, 34)
 
-    # Gold accent line at top of strip
+    # Gold accent line at top
     d.rectangle([0, 0, 1280, 4], fill=(255, 180, 0, 255))
 
-    font  = ImageFont.truetype(FONT_REG,  38)
-    bfont = ImageFont.truetype(FONT_BOLD, 32)
-
-    # Main CTA text
-    bbox = d.textbbox((0,0), CTA_TEXT, font=font)
-    tw   = bbox[2]-bbox[0]
-    tx   = (1280 - tw) // 2
-    d.text((tx+1, 18), CTA_TEXT, font=font, fill=(0,0,0,140))
-    d.text((tx,   17), CTA_TEXT, font=font, fill="white")
-
-    # ABONNIEREN button (right-aligned in strip)
-    sbbox = d.textbbox((0,0), CTA_BTN_TEXT, font=bfont)
+    # Measure text and button
+    tbbox = d.textbbox((0, 0), CTA_TEXT, font=font)
+    tw, th = tbbox[2]-tbbox[0], tbbox[3]-tbbox[1]
+    sbbox = d.textbbox((0, 0), CTA_BTN_TEXT, font=bfont)
     stw, sth = sbbox[2]-sbbox[0], sbbox[3]-sbbox[1]
-    btn_w, btn_h = stw + 40, 46
-    btn_x = (1280 - btn_w) // 2
-    btn_y = 68
-    d.rounded_rectangle([btn_x, btn_y, btn_x+btn_w, btn_y+btn_h],
-                         radius=8, fill=(220, 0, 0, 240))
-    sx = btn_x + (btn_w - stw) // 2
-    sy = btn_y + (btn_h - sth) // 2
+    btn_w, btn_h = stw + 50, th + 16
+
+    gap     = 30
+    total_w = tw + gap + btn_w
+    start_x = (1280 - total_w) // 2
+    cy      = strip_h // 2
+
+    # Text with shadow
+    ty = cy - th // 2 + 4
+    d.text((start_x+2, ty+2), CTA_TEXT, font=font, fill=(0, 0, 0, 180))
+    d.text((start_x,   ty),   CTA_TEXT, font=font, fill="white")
+
+    # Button
+    bx = start_x + tw + gap
+    by = cy - btn_h // 2 + 4
+    d.rounded_rectangle([bx, by, bx+btn_w, by+btn_h], radius=8, fill=(220, 0, 0, 255))
+    sx = bx + (btn_w - stw) // 2
+    sy = by + (btn_h - sth) // 2
     d.text((sx, sy), CTA_BTN_TEXT, font=bfont, fill="white")
 
     img.save(png)
     return png
 
 def apply_cta_overlay(src_seg, dst, duration=CTA_DURATION):
-    """Burn CTA strip overlay onto bottom of a video segment with fade in/out."""
+    """Burn transparent CTA strip onto video frame using ffmpeg overlay filter."""
     overlay_png = make_cta_overlay_png()
-    strip_y = 720 - 160   # position strip at bottom
-    fade_f  = max(1, int(0.15 * 30))
-
-    # overlay filter: place PNG at bottom, fade the whole output in/out
-    vf = (f"movie={overlay_png}[ov];"
-          f"[in][ov]overlay=0:{strip_y}:format=auto,"
-          f"fade=in:0:{fade_f},"
-          f"fade=out:st={max(0,duration-0.15):.3f}:d=0.15[out]")
+    fade_f = max(1, int(0.15 * 30))
 
     r = subprocess.run([
         FFMPEG, "-y",
-        "-ss", "0", "-i", src_seg,
+        "-i", src_seg,
+        "-i", overlay_png,
         "-t", f"{duration:.3f}",
-        "-filter_complex", vf,
+        "-filter_complex",
+        (f"[0:v][1:v]overlay=0:{CTA_STRIP_Y}:format=auto[ov];"
+         f"[ov]fade=in:0:{fade_f},"
+         f"fade=out:st={max(0,duration-0.15):.3f}:d=0.15[out]"),
         "-map", "[out]",
         "-r","30","-c:v","libx264","-preset","fast","-crf","20",
         "-an", dst
     ], capture_output=True)
+    if r.returncode != 0:
+        print(f"  CTA overlay error: {r.stderr.decode()[-150:]}")
     return r.returncode == 0
 
 # ── Whoosh SFX (always regenerate to ensure fresh file) ──────────────────────
