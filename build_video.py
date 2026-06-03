@@ -271,20 +271,22 @@ def best_offset(raw_path, text, needed_dur, src_dur):
     return best_t, best_s
 
 # ── Segment encoding ──────────────────────────────────────────────────────────
-def make_seg(src, dst, duration, start_offset=0.0, ken_burns=False, zpunch_t=None):
-    """Encode a single video segment with optional Ken Burns / zoom punch."""
+def make_seg(src, dst, duration, start_offset=0.0, scene_last=False, ken_burns=False, zpunch_t=None):
+    """Encode a single video segment. Scene-last clips get fade-out; all clips get fade-in."""
+    FADE_IN_F  = 8                          # 8 frames fade-in on every clip
+    FADE_OUT_F = 8                          # 8 frames fade-out on scene-last clips
+    fade_out_st = max(0, duration - FADE_OUT_F/30)
+
     vf_parts = [
         f"scale=1280:720:force_original_aspect_ratio=decrease",
         f"pad=1280:720:(ow-iw)/2:(oh-ih)/2:black",
-        f"setsar=1"
+        f"setsar=1",
+        f"fade=in:0:{FADE_IN_F}",
     ]
+    if scene_last:
+        vf_parts.append(f"fade=out:st={fade_out_st:.3f}:d={FADE_OUT_F/30:.3f}")
+
     # Ken Burns (zoompan) skipped — freezes video input on first frame
-    if zpunch_t is not None and 0 < zpunch_t < duration - ZPUNCH_DUR:
-        zs = int(zpunch_t * 30)
-        zd = int(ZPUNCH_DUR * 30)
-        vf_parts.append(
-            f"zoompan=z='if(between(on,{zs},{zs+zd}),{ZPUNCH_SCALE},1)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=1280x720:fps=30"
-        )
     vf = ",".join(vf_parts)
     cmd = [FFMPEG,"-y",
            "-ss", f"{start_offset:.3f}",
@@ -591,7 +593,8 @@ for i, clip in enumerate(CLIPS):
           f"src={actual_dur:.0f}s  off={best_t:.1f}s  CLIP={best_s:.3f}  "
           f"KB={'Y' if kb else 'N'}  {queries[0][:35]}")
 
-    ok = make_seg(raw_p, seg_p, dur, start_offset=best_t, ken_burns=kb)
+    ok = make_seg(raw_p, seg_p, dur, start_offset=best_t,
+                  scene_last=clip["scene_last"], ken_burns=kb)
 
     if ok:
         # Apply CTA overlay if flagged
@@ -623,35 +626,16 @@ for seg_p, t_start, t_end, is_whoosh, is_cta in timeline:
 
 print(f"Whoosh at {len(whoosh_ts_ms)} scene transitions")
 
-# ── Build final segment list with fade transitions at scene boundaries ────────
-TRANSDIR = f"{WORK}/trans"
-os.makedirs(TRANSDIR, exist_ok=True)
-
-final_segs = []
-for idx, (seg_p, t_start, t_end, is_scene_last, is_cta) in enumerate(timeline):
-    if not seg_p or not os.path.exists(seg_p):
-        continue
-    final_segs.append((seg_p, is_scene_last))
-
-concat_list = []
-for idx, (seg_p, is_scene_last) in enumerate(final_segs):
-    concat_list.append(seg_p)
-    # Insert fade transition clip between scene boundaries
-    if is_scene_last and idx < len(final_segs) - 1:
-        next_seg = final_segs[idx+1][0]
-        trans_p  = f"{TRANSDIR}/t{idx:04d}.mp4"
-        if not os.path.exists(trans_p):
-            make_fade_transition(seg_p, next_seg, trans_p, FADE_DUR)
-        if os.path.exists(trans_p):
-            concat_list.append(trans_p)
-
+# ── Concatenate all segments ──────────────────────────────────────────────────
+# Transitions are baked into clips: fade-in on every clip, fade-out on scene-last clips
 concat_f = f"{WORK}/concat.txt"
 with open(concat_f,"w") as f:
-    for p in concat_list:
-        f.write(f"file '{p}'\n")
+    for seg_p, *_ in timeline:
+        if seg_p and os.path.exists(seg_p):
+            f.write(f"file '{seg_p}'\n")
 
 combined = f"{WORK}/combined.mp4"
-print(f"Concatenating {len(concat_list)} segments (incl. {len(concat_list)-len(final_segs)} fade transitions)…")
+print(f"Concatenating {len(timeline)} segments…")
 r = subprocess.run([FFMPEG,"-y","-f","concat","-safe","0","-i",concat_f,
                     "-c:v","libx264","-preset","fast","-crf","21", combined],
                    capture_output=True)
