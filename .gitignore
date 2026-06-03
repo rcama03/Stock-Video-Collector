@@ -11,3 +11,4 @@ build/
 venv/
 *.bak
 CLAUDE.md
+api_keys.env
