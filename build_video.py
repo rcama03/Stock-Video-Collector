@@ -35,10 +35,11 @@ for d in [RAWDIR, SEGDIR, FRMDIR, THUMBDIR, CTADIR]:
 from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(__file__), "api_keys.env"))
 
-PEXELS_KEY   = os.getenv("PEXELS_API_KEY")
-PIXABAY_KEY  = os.getenv("PIXABAY_API_KEY")
-COVERR_KEY   = os.getenv("COVERR_API_KEY")
-FREEPIK_KEY  = os.getenv("FREEPIK_API_KEY")
+PEXELS_KEY       = os.getenv("PEXELS_API_KEY")
+PIXABAY_KEY      = os.getenv("PIXABAY_API_KEY")
+COVERR_KEY       = os.getenv("COVERR_API_KEY")
+FREEPIK_KEY      = os.getenv("FREEPIK_API_KEY")
+SHUTTERSTOCK_KEY = os.getenv("SHUTTERSTOCK_API_KEY")
 
 CLIP_MIN_DUR  = 4.0
 CLIP_MAX_DUR  = 7.0
@@ -180,6 +181,59 @@ def search_coverr(queries, min_dur, top_n=4):
                        v.get("urls",{}).get("mp4_1080") or
                        v.get("mp4",""))
                 thumb = v.get("coverImageUrl","") or v.get("thumbnail","")
+                if src:
+                    results.append((src, vid, dur, thumb))
+                if len(results) >= top_n: return results
+        except Exception: pass
+        time.sleep(0.1)
+    return results
+
+def search_freepik(queries, min_dur, top_n=6):
+    results = []
+    for query in queries:
+        try:
+            r = requests.get("https://api.freepik.com/v1/videos",
+                             headers={"X-Freepik-API-Key": FREEPIK_KEY,
+                                      "Accept-Language": "en-US"},
+                             params={"term": query, "per_page": 10},
+                             timeout=20)
+            if r.status_code != 200: continue
+            for v in r.json().get("data", []):
+                vid = f"fp_{v.get('id','')}"
+                if vid in used_ids: continue
+                dur = v.get("duration", 0)
+                if dur < min_dur: continue
+                thumb = v.get("image", {}).get("source", {}).get("url", "")
+                src   = (v.get("downloads", {}).get("mp4_fullhd", {}).get("url") or
+                         v.get("downloads", {}).get("mp4_hd", {}).get("url") or
+                         v.get("downloads", {}).get("mp4", {}).get("url", ""))
+                if src:
+                    results.append((src, vid, dur, thumb))
+                if len(results) >= top_n: return results
+        except Exception: pass
+        time.sleep(0.1)
+    return results
+
+def search_shutterstock(queries, min_dur, top_n=6):
+    results = []
+    for query in queries:
+        try:
+            r = requests.get("https://api.shutterstock.com/v2/videos/search",
+                             headers={"Authorization": f"Bearer {SHUTTERSTOCK_KEY}"},
+                             params={"query": query, "per_page": 10,
+                                     "min_duration": int(min_dur),
+                                     "aspect_ratio": "16_9",
+                                     "resolution": "hd"},
+                             timeout=20)
+            if r.status_code != 200: continue
+            for v in r.json().get("data", []):
+                vid = f"ss_{v.get('id','')}"
+                if vid in used_ids: continue
+                dur = v.get("duration", 0)
+                if dur < min_dur: continue
+                thumb = v.get("assets", {}).get("thumb_webm", {}).get("url", "")
+                # Shutterstock preview URLs (watermarked but usable for CLIP scoring)
+                src = v.get("assets", {}).get("preview_mp4", {}).get("url", "")
                 if src:
                     results.append((src, vid, dur, thumb))
                 if len(results) >= top_n: return results
@@ -498,6 +552,8 @@ for i, clip in enumerate(CLIPS):
     candidates += search_pexels(queries, min_src, top_n=8)
     candidates += search_pixabay(queries, min_src, top_n=6)
     candidates += search_coverr(queries[:1], min_src, top_n=4)
+    candidates += search_freepik(queries[:1], min_src, top_n=6)
+    candidates += search_shutterstock(queries[:1], min_src, top_n=6)
 
     url, vid, src_dur = best_candidate(candidates, desc)
 
