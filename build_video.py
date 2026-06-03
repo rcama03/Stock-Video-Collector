@@ -302,10 +302,9 @@ def apply_cta_overlay(src_seg, dst, duration=CTA_DURATION):
         FFMPEG, "-y",
         "-i", src_seg,
         "-i", overlay_png,
-        "-t", f"{duration:.3f}",
         "-filter_complex",
-        (f"[0:v][1:v]overlay=0:{CTA_STRIP_Y}:format=auto[ov];"
-         f"[ov]fade=in:0:{fade_f},"
+        (f"[0:v][1:v]overlay=0:{CTA_STRIP_Y}:format=auto,"
+         f"fade=in:0:{fade_f},"
          f"fade=out:st={max(0,duration-0.15):.3f}:d=0.15[out]"),
         "-map", "[out]",
         "-r","30","-c:v","libx264","-preset","fast","-crf","20",
@@ -313,6 +312,26 @@ def apply_cta_overlay(src_seg, dst, duration=CTA_DURATION):
     ], capture_output=True)
     if r.returncode != 0:
         print(f"  CTA overlay error: {r.stderr.decode()[-150:]}")
+        # fallback: just copy the segment without overlay
+        import shutil; shutil.copy(src_seg, dst)
+    return os.path.exists(dst)
+
+def make_fade_transition(seg_a, seg_b, dst, fade_dur=FADE_DUR):
+    """Create a crossfade transition clip between two segments."""
+    dur_a = get_dur(seg_a)
+    frames = max(1, int(fade_dur * 30))
+    offset = max(0, dur_a - fade_dur)
+    r = subprocess.run([
+        FFMPEG, "-y",
+        "-i", seg_a, "-i", seg_b,
+        "-filter_complex",
+        (f"[0:v]trim=start={offset:.3f},setpts=PTS-STARTPTS[va];"
+         f"[1:v]trim=end={fade_dur:.3f},setpts=PTS-STARTPTS[vb];"
+         f"[va][vb]blend=all_expr='A*(1-T/{fade_dur})+B*(T/{fade_dur})'[out]"),
+        "-map", "[out]",
+        "-r","30","-c:v","libx264","-preset","fast","-crf","21",
+        "-an", "-t", f"{fade_dur:.3f}", dst
+    ], capture_output=True)
     return r.returncode == 0
 
 # ── Whoosh SFX (always regenerate to ensure fresh file) ──────────────────────
@@ -546,15 +565,35 @@ for seg_p, t_start, t_end, is_whoosh, is_cta in timeline:
 
 print(f"Whoosh at {len(whoosh_ts_ms)} scene transitions")
 
-# ── Concatenate video ─────────────────────────────────────────────────────────
+# ── Build final segment list with fade transitions at scene boundaries ────────
+TRANSDIR = f"{WORK}/trans"
+os.makedirs(TRANSDIR, exist_ok=True)
+
+final_segs = []
+for idx, (seg_p, t_start, t_end, is_scene_last, is_cta) in enumerate(timeline):
+    if not seg_p or not os.path.exists(seg_p):
+        continue
+    final_segs.append((seg_p, is_scene_last))
+
+concat_list = []
+for idx, (seg_p, is_scene_last) in enumerate(final_segs):
+    concat_list.append(seg_p)
+    # Insert fade transition clip between scene boundaries
+    if is_scene_last and idx < len(final_segs) - 1:
+        next_seg = final_segs[idx+1][0]
+        trans_p  = f"{TRANSDIR}/t{idx:04d}.mp4"
+        if not os.path.exists(trans_p):
+            make_fade_transition(seg_p, next_seg, trans_p, FADE_DUR)
+        if os.path.exists(trans_p):
+            concat_list.append(trans_p)
+
 concat_f = f"{WORK}/concat.txt"
 with open(concat_f,"w") as f:
-    for seg_p,*_ in timeline:
-        if seg_p and os.path.exists(seg_p):
-            f.write(f"file '{seg_p}'\n")
+    for p in concat_list:
+        f.write(f"file '{p}'\n")
 
 combined = f"{WORK}/combined.mp4"
-print("Concatenating…")
+print(f"Concatenating {len(concat_list)} segments (incl. {len(concat_list)-len(final_segs)} fade transitions)…")
 r = subprocess.run([FFMPEG,"-y","-f","concat","-safe","0","-i",concat_f,
                     "-c:v","libx264","-preset","fast","-crf","21", combined],
                    capture_output=True)
