@@ -402,12 +402,12 @@ else:
 
 # ── Scene plan ────────────────────────────────────────────────────────────────
 # Scene boundaries computed from word counts proportionally against total duration
-# Total words: 1262  |  Total duration: 540.58s  |  Rate: 0.4284 s/word
+# Total words: 1320  |  Total duration: 536.33s  |  Rate: 0.4063 s/word
 TOTAL_DUR = get_dur(AUDIO)
-RATE = TOTAL_DUR / 1262.0
+RATE = TOTAL_DUR / 1320.0
 
-SCENE_WORDS = [39,41,32,40,40,39,40,40,40,39,40,37,39,47,42,36,34,37,40,30,
-               39,38,40,39,38,36,45,40,45,38,42,50]
+SCENE_WORDS = [38,36,35,39,39,41,37,37,40,39,41,31,36,40,40,34,42,42,41,39,
+               37,39,46,42,45,45,42,42,37,43,39,48,48]
 
 scene_starts = []
 t = 0.0
@@ -416,72 +416,74 @@ for w in SCENE_WORDS:
     t += w * RATE
 scene_ends = scene_starts[1:] + [round(TOTAL_DUR, 2)]
 
-# (desc, [queries]) per scene
+# (desc, [queries]) per scene — pilot lies video
 SCENE_META = [
-    ("travelers paying for airport lounge access terminal",
-     ["airport lounge entrance luxury travelers","airport terminal crowd travelers","premium airport lounge door"]),
-    ("airport lounge interior food drinks quiet comfortable",
-     ["airport lounge interior food buffet","airport lounge comfortable seating relaxing","luxury airport lounge dining"]),
-    ("airline business profit revenue membership billions",
-     ["airline business profit money corporate","business travel luxury executive","airline revenue strategy boardroom"]),
-    ("premium credit card Amex Platinum travel lounge access",
-     ["premium credit card travel benefits","American Express platinum card luxury","credit card airport lounge access"]),
-    ("Priority Pass lounge network worldwide 1500 lounges",
-     ["priority pass card airport lounge","airport lounge network worldwide travel","travel membership card lounge access"]),
-    ("frequent flyer airline alliance status miles program",
-     ["frequent flyer miles program card airline","airline loyalty program elite status","airport boarding priority frequent flyer"]),
-    ("couple companions at airport lounge guest access",
-     ["couple at airport lounge relaxing","friends companions airport lounge","travel companions airport departure"]),
-    ("smartphone app LoungeBuddy discount day pass airport",
-     ["smartphone app travel booking airport","travel discount app phone booking","person using phone airport app"]),
-    ("mystery secret reveal airport gate dramatic suspense",
-     ["airport gate passenger waiting dramatic","mystery reveal secret dramatic moment","airport gate entrance suspense reveal"]),
-    ("flight delay airport gate passengers waiting EU rights",
-     ["flight delay airport passengers waiting gate","delayed flight departure board airport","airplane delay frustrated passengers gate"]),
-    ("passenger speaking airline staff counter EU regulation",
-     ["passenger airline staff counter conversation","airport gate counter customer service","airline staff helping passenger airport"]),
-    ("statistics data research study passenger rights claims",
-     ["statistics data chart research study","passenger rights information document","data statistics graph percentage"]),
-    ("business class airplane interior luxury seat upgrade",
-     ["business class airplane seat luxury","airline business class interior upgrade","first class airplane cabin luxury seat"]),
-    ("calendar planning travel schedule airline app upgrade",
-     ["calendar travel planning schedule phone","airline app upgrade offer booking","travel schedule planning calendar days"]),
-    ("premium credit card application signup trial benefits",
-     ["credit card application premium signup","premium credit card benefits luxury","credit card travel membership trial"]),
-    ("calendar phone reminder notification date important",
-     ["phone calendar reminder notification","person setting reminder phone calendar","important date calendar mark phone"]),
-    ("travel agency online booking portal website laptop",
-     ["travel agency online booking website","person booking travel online laptop","travel booking portal website screen"]),
-    ("normal traveler ordinary person at airport lounge",
-     ["ordinary traveler at airport lounge","diverse people airport lounge sitting","normal passenger airport lounge relaxed"]),
-    ("luxury airport lounge interior spa shower premium",
-     ["luxury airport lounge interior design","premium airport lounge spa shower","Lufthansa business lounge premium interior"]),
-    ("travel tips checklist summary list methods airport",
-     ["travel tips checklist summary list","smart traveler airport tips methods","airport travel smart advice checklist"]),
-    ("passenger asking airline staff counter reception",
-     ["passenger asking airline staff reception desk","person speaking confidently airport counter","airport reception customer asking staff"]),
-    ("lounge reception desk trial access conversation",
-     ["airport lounge reception desk conversation","hotel reception customer service desk","lounge entrance reception staff speaking"]),
-    ("credit cards comparison premium travel German",
-     ["credit cards comparison spread out premium","travel credit cards multiple comparison","premium credit cards Germany travel"]),
-    ("family children airport lounge parents kids traveling",
-     ["family with children at airport lounge","parents children airport departure lounge","family travel airport kids happy"]),
-    ("person laptop research travel website reviews online",
-     ["person laptop researching travel reviews","reading travel website laptop reviews","online travel research airport lounge"]),
-    ("airline marketing advertisement strategy revenue",
-     ["airline marketing advertisement billboard","business marketing strategy meeting","airline brand commercial advertising"]),
-    ("early morning empty quiet airport lounge timing",
-     ["early morning quiet airport terminal","airport lounge morning peaceful empty","airport departure early morning travelers"]),
-    ("Singapore Changi airport modern luxury Asian terminal",
-     ["Singapore Changi airport luxury interior","Asian airport modern luxury terminal","Singapore airport premium architecture"]),
-    ("airport growth statistics future aviation IATA billions",
-     ["busy modern airport terminal growth","aviation industry future statistics growth","airport crowd passenger volume growth"]),
-    ("traveler checking phone credit card action plan today",
-     ["traveler phone credit card checking action","person preparing travel checklist phone","smart traveler action plan airport"]),
-    ("crowded airport terminal stress vs relaxed lounge",
-     ["crowded busy airport terminal stress","relaxed traveler comfortable lounge contrast","busy terminal vs calm lounge traveler"]),
-    ("happy satisfied traveler airport success journey",
-     ["happy satisfied traveler airport success","smiling traveler airport departure confident","successful journey traveler airport happy"]),
+    ("tired exhausted pilot cockpit airplane night",
+     ["tired exhausted pilot cockpit","pilot fatigue airplane controls night","cockpit pilot fatigued night flight"]),
+    ("pilot falling asleep cockpit airplane autopilot",
+     ["pilot sleeping cockpit airplane","pilot fatigue asleep flight cockpit","airplane autopilot cockpit fatigue pilot"]),
+    ("severe airplane turbulence cabin passengers shaking",
+     ["severe turbulence airplane shaking cabin","airplane turbulence passengers cabin","flight turbulence warning shaking"]),
+    ("pilot calm cockpit announcement turbulence passengers",
+     ["pilot calm cockpit controls announcement","pilot speaking passengers intercom airplane","pilot announcement calm turbulence flight"]),
+    ("exhausted airline crew long shift pilot fatigue",
+     ["tired airline crew airport shift","pilot exhausted fatigue long shift","airline crew tired fatigue long work"]),
+    ("pilot fatigue error critical statistics study",
+     ["pilot fatigue error aviation statistics","aviation safety study data chart","pilot error critical fatigue research"]),
+    ("pilot co-pilot airplane different meals food regulation",
+     ["pilot airplane food meal tray cockpit","airplane food service different meals","airline food different pilots safety rule"]),
+    ("pilot incapacitated food poisoning airplane emergency",
+     ["pilot emergency airplane food poisoning","airplane emergency landing cockpit help","flight emergency incapacitated pilot"]),
+    ("airplane technical defect MEL minimum equipment list",
+     ["airplane maintenance technical inspection defect","aircraft technical defect check system","aviation MEL defect system airplane"]),
+    ("FAA aviation regulations safety rules document",
+     ["aviation regulations safety FAA rules","airplane systems safety check regulations","aviation authority safety rules official"]),
+    ("pilot cockpit silent emergency secret passengers unaware",
+     ["pilot emergency cockpit secret silent","airplane emergency cockpit crew action","flight technical emergency cockpit hidden"]),
+    ("airplane hydraulic engine pressure emergency silent cabin",
+     ["airplane hydraulic system emergency","aircraft engine problem emergency cabin","airplane cabin pressure loss emergency"]),
+    ("pilot emergency training simulator calm cockpit",
+     ["pilot emergency training simulator calm","pilot calm training cockpit professional","aviation emergency training pilot cockpit"]),
+    ("airplane emergency evacuation exit blocked passengers",
+     ["airplane emergency exit evacuation blocked","passengers emergency exit airplane evacuation","aircraft emergency evacuation exit row"]),
+    ("airplane cabin air ventilation bleed air engine",
+     ["airplane cabin air ventilation engine","aircraft bleed air ventilation system","airplane air supply engine duct cabin"]),
+    ("toxic chemical fumes airplane cabin aerotoxic",
+     ["toxic fumes airplane cabin chemical air","aerotoxic syndrome airplane cabin air","chemical contamination airplane air fumes"]),
+    ("oxygen mask airplane cabin drop emergency",
+     ["oxygen mask airplane cabin emergency drop","airplane emergency oxygen mask passenger","oxygen mask breathing airplane cabin"]),
+    ("airplane altitude pressure loss cockpit emergency",
+     ["airplane altitude pressure emergency cockpit","aircraft cabin pressure loss altitude","high altitude pressure airplane emergency"]),
+    ("flight attendant safety demonstration passengers listening",
+     ["flight safety demonstration passengers attention","airline safety briefing passengers listen","flight attendant safety speech airplane"]),
+    ("airplane safe landing runway arrival airport",
+     ["airplane safe landing runway arrival","aircraft landing airport runway touchdown","airplane touchdown runway safe landing"]),
+    ("pilot safety report document writing internal airline",
+     ["pilot safety report document writing","aviation safety report document internal","airline internal safety report pilot"]),
+    ("aviation safety system control information passenger",
+     ["aviation safety system airport control","airline safety system information control","aviation information safety system"]),
+    ("airplane flying safely statistics safest transport world",
+     ["airplane flying safely statistics transport","aviation safest transport statistics record","airplane flight safety statistics world"]),
+    ("pilot professional training cockpit calm years",
+     ["pilot professional training cockpit calm","airline pilot training academy simulator","pilot cockpit professional trained calm"]),
+    ("passenger rights information transparency airline",
+     ["passenger information rights airport airline","airline passenger rights information transparent","traveler passenger rights airplane info"]),
+    ("airplane emergency exit row seat near door",
+     ["airplane emergency exit row seat","passenger near exit row airplane seat","aircraft emergency exit door row seat"]),
+    ("pilot flight simulator training hours cockpit",
+     ["pilot flight simulator training hours","airline pilot simulator cockpit training","aviation training simulator pilot hours"]),
+    ("airplane flying clouds data statistics information bubble",
+     ["airplane flying clouds statistics data","commercial flight safe statistics clouds","airline flight data information sky"]),
+    ("airplane cargo weight loading overbooked airport",
+     ["airplane loading weight airport cargo","aircraft weight cargo loading max","airplane maximum weight loading airport"]),
+    ("airplane autopilot cockpit controls flying pilot",
+     ["airplane autopilot cockpit controls","pilot autopilot engage cockpit system","aircraft autopilot system cockpit pilot"]),
+    ("aviation facts summary list safety airplane truth",
+     ["aviation facts summary list safety","airplane travel safety facts summary","flight safety information summary list"]),
+    ("confident informed passenger boarding airplane airport",
+     ["passenger boarding airplane confident informed","informed traveler airplane boarding gate","confident passenger airplane departure gate"]),
+    ("happy traveler subscribe aviation channel content",
+     ["happy satisfied traveler airport success","content aviation travel knowledge channel","travel channel aviation subscribe happy"]),
 ]
 
 # ── Build clip list (4-7s sub-clips per scene) ────────────────────────────────
@@ -682,12 +684,17 @@ else:
     print("Skipping whoosh mix — using voiceover only.")
     mixed = AUDIO
 
-# ── Final mux ─────────────────────────────────────────────────────────────────
+# ── Final mux with end fade-to-black ─────────────────────────────────────────
 print(f"Muxing → {OUTPUT}")
+fade_out_start = max(0, vid_dur - 1.5)
 r = subprocess.run([FFMPEG,"-y",
                     "-i", combined, "-i", mixed,
-                    "-map","0:v:0","-map","1:a:0",
-                    "-c:v","copy","-c:a","aac","-b:a","128k",
+                    "-filter_complex",
+                    (f"[0:v]fade=out:st={fade_out_start:.3f}:d=1.5[vout];"
+                     f"[1:a]afade=t=out:st={fade_out_start:.3f}:d=1.5[aout]"),
+                    "-map","[vout]","-map","[aout]",
+                    "-c:v","libx264","-preset","fast","-crf","21",
+                    "-c:a","aac","-b:a","128k",
                     "-shortest", OUTPUT], capture_output=True)
 if r.returncode != 0:
     print("MUX ERROR:", r.stderr.decode()[-400:]); sys.exit(1)
