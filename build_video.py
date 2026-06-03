@@ -63,12 +63,17 @@ _clip_model.eval()
 print("CLIP ready.\n")
 
 def clip_score(image_path, text):
+    """Return cosine similarity between image and text embeddings (0-1 scale)."""
     try:
-        img    = Image.open(image_path).convert("RGB")
-        inputs = _clip_proc(text=[text], images=img, return_tensors="pt", padding=True)
+        img = Image.open(image_path).convert("RGB")
+        img_inputs = _clip_proc(images=img, return_tensors="pt", padding=True)
+        txt_inputs = _clip_proc(text=[text], return_tensors="pt", padding=True)
         with torch.no_grad():
-            out = _clip_model(**inputs)
-        return float(out.logits_per_image.softmax(dim=1)[0][0])
+            img_emb = _clip_model.get_image_features(**img_inputs)
+            txt_emb = _clip_model.get_text_features(**txt_inputs)
+        img_emb = img_emb / img_emb.norm(dim=-1, keepdim=True)
+        txt_emb = txt_emb / txt_emb.norm(dim=-1, keepdim=True)
+        return float((img_emb @ txt_emb.T).squeeze())
     except Exception:
         return 0.0
 
@@ -301,9 +306,13 @@ def make_cta_video(dst, duration=CTA_DURATION):
 WHOOSH = f"{WORK}/whoosh.wav"
 if not os.path.exists(WHOOSH):
     expr = "sin(2*PI*(120+2800*(t/0.5))*t)*0.38*(1-abs(2*t/0.5-1))^1.4"
-    subprocess.run([FFMPEG,"-y","-f","lavfi",
-                    f"-i","aevalsrc='{expr}':s=44100:c=mono:d=0.5",
+    r = subprocess.run([FFMPEG,"-y","-f","lavfi",
+                    "-i", f"aevalsrc={expr}:s=44100:c=mono:d=0.5",
                     WHOOSH], capture_output=True)
+    if r.returncode != 0:
+        print("Whoosh gen error:", r.stderr.decode()[-200:])
+    else:
+        print("Whoosh SFX generated.")
 
 # ── Scene plan ────────────────────────────────────────────────────────────────
 # Scene boundaries computed from word counts proportionally against total duration
