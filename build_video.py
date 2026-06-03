@@ -251,68 +251,82 @@ def make_seg(src, dst, duration, start_offset=0.0, ken_burns=False, zpunch_t=Non
 FONT_REG  = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
-def make_cta_video(dst, duration=CTA_DURATION):
-    """Generate CTA card as a short video segment."""
-    img = Image.new("RGBA", (1280, 720), (10, 10, 20, 255))
-    overlay = Image.new("RGBA", (1280, 720), (0, 0, 0, 0))
-    od = ImageDraw.Draw(overlay)
-    od.rectangle([0, 240, 1280, 480], fill=(0, 0, 0, 180))
-    img = Image.alpha_composite(img, overlay)
-    d = ImageDraw.Draw(img)
+def make_cta_overlay_png():
+    """Generate transparent CTA strip PNG (bottom third of frame)."""
+    png = f"{CTADIR}/cta_overlay.png"
+    if os.path.exists(png):
+        return png
 
-    font = ImageFont.truetype(FONT_REG, 52)
+    # Strip covers bottom 160px of 720p frame
+    strip_h = 160
+    img = Image.new("RGBA", (1280, strip_h), (0, 0, 0, 0))
+    d   = ImageDraw.Draw(img)
+
+    # Semi-transparent dark background
+    d.rectangle([0, 0, 1280, strip_h], fill=(0, 0, 0, 185))
+
+    # Gold accent line at top of strip
+    d.rectangle([0, 0, 1280, 4], fill=(255, 180, 0, 255))
+
+    font  = ImageFont.truetype(FONT_REG,  38)
+    bfont = ImageFont.truetype(FONT_BOLD, 32)
+
+    # Main CTA text
     bbox = d.textbbox((0,0), CTA_TEXT, font=font)
-    tw, th = bbox[2]-bbox[0], bbox[3]-bbox[1]
-    tx = (1280 - tw) // 2
-    ty = 258
+    tw   = bbox[2]-bbox[0]
+    tx   = (1280 - tw) // 2
+    d.text((tx+1, 18), CTA_TEXT, font=font, fill=(0,0,0,140))
+    d.text((tx,   17), CTA_TEXT, font=font, fill="white")
 
-    # Gold lines matching text width
-    d.rectangle([tx, 248, tx+tw, 252], fill=(255, 180, 0, 255))
-    d.rectangle([tx, 468, tx+tw, 472], fill=(255, 180, 0, 255))
-
-    # Main text
-    d.text((tx+2, ty+2), CTA_TEXT, font=font, fill=(0, 0, 0, 160))
-    d.text((tx, ty), CTA_TEXT, font=font, fill="white")
-
-    # ABONNIEREN button
-    sfont = ImageFont.truetype(FONT_BOLD, 46)
-    sbbox = d.textbbox((0,0), CTA_BTN_TEXT, font=sfont)
+    # ABONNIEREN button (right-aligned in strip)
+    sbbox = d.textbbox((0,0), CTA_BTN_TEXT, font=bfont)
     stw, sth = sbbox[2]-sbbox[0], sbbox[3]-sbbox[1]
-    btn_w, btn_h = 420, 76
+    btn_w, btn_h = stw + 40, 46
     btn_x = (1280 - btn_w) // 2
-    btn_y = 348
-    d.rounded_rectangle([btn_x, btn_y, btn_x+btn_w, btn_y+btn_h], radius=10, fill=(255, 0, 0))
+    btn_y = 68
+    d.rounded_rectangle([btn_x, btn_y, btn_x+btn_w, btn_y+btn_h],
+                         radius=8, fill=(220, 0, 0, 240))
     sx = btn_x + (btn_w - stw) // 2
     sy = btn_y + (btn_h - sth) // 2
-    d.text((sx, sy), CTA_BTN_TEXT, font=sfont, fill="white")
+    d.text((sx, sy), CTA_BTN_TEXT, font=bfont, fill="white")
 
-    png = f"{CTADIR}/cta.png"
-    img.convert("RGB").save(png)
+    img.save(png)
+    return png
 
-    frames = int(duration * 30)
-    fade_f = max(1, int(0.12 * 30))
-    subprocess.run([
+def apply_cta_overlay(src_seg, dst, duration=CTA_DURATION):
+    """Burn CTA strip overlay onto bottom of a video segment with fade in/out."""
+    overlay_png = make_cta_overlay_png()
+    strip_y = 720 - 160   # position strip at bottom
+    fade_f  = max(1, int(0.15 * 30))
+
+    # overlay filter: place PNG at bottom, fade the whole output in/out
+    vf = (f"movie={overlay_png}[ov];"
+          f"[in][ov]overlay=0:{strip_y}:format=auto,"
+          f"fade=in:0:{fade_f},"
+          f"fade=out:st={max(0,duration-0.15):.3f}:d=0.15[out]")
+
+    r = subprocess.run([
         FFMPEG, "-y",
-        "-loop","1","-i", png,
+        "-ss", "0", "-i", src_seg,
         "-t", f"{duration:.3f}",
-        "-vf", (f"fade=in:0:{fade_f},"
-                f"fade=out:st={max(0,duration-0.12):.3f}:d=0.12"),
+        "-filter_complex", vf,
+        "-map", "[out]",
         "-r","30","-c:v","libx264","-preset","fast","-crf","20",
         "-an", dst
     ], capture_output=True)
-    return os.path.exists(dst)
+    return r.returncode == 0
 
-# ── Whoosh SFX ────────────────────────────────────────────────────────────────
+# ── Whoosh SFX (always regenerate to ensure fresh file) ──────────────────────
 WHOOSH = f"{WORK}/whoosh.wav"
-if not os.path.exists(WHOOSH):
-    expr = "sin(2*PI*(120+2800*(t/0.5))*t)*0.38*(1-abs(2*t/0.5-1))^1.4"
-    r = subprocess.run([FFMPEG,"-y","-f","lavfi",
-                    "-i", f"aevalsrc={expr}:s=44100:c=mono:d=0.5",
-                    WHOOSH], capture_output=True)
-    if r.returncode != 0:
-        print("Whoosh gen error:", r.stderr.decode()[-200:])
-    else:
-        print("Whoosh SFX generated.")
+expr = "sin(2*PI*(120+2800*(t/0.5))*t)*0.38*(1-abs(2*t/0.5-1))^1.4"
+r = subprocess.run([FFMPEG,"-y","-f","lavfi",
+                "-i", f"aevalsrc={expr}:s=44100:c=mono:d=0.5",
+                WHOOSH], capture_output=True)
+if r.returncode != 0:
+    print("Whoosh gen error:", r.stderr.decode()[-200:])
+    WHOOSH = None
+else:
+    print("Whoosh SFX generated.")
 
 # ── Scene plan ────────────────────────────────────────────────────────────────
 # Scene boundaries computed from word counts proportionally against total duration
@@ -444,15 +458,13 @@ for i, clip in enumerate(CLIPS):
     dur     = clip["dur"]
     seg_p   = f"{SEGDIR}/s{i:04d}.mp4"
 
-    # ── Check if CTA should be inserted before this clip ──────────────────
+    # ── Check if CTA overlay should be applied to this clip ───────────────
     for ci, ct in enumerate(cta_times):
-        if ci not in cta_inserted and cum_t >= ct - dur/2:
-            cta_p = f"{CTADIR}/cta_{ci}.mp4"
-            if make_cta_video(cta_p, CTA_DURATION):
-                timeline.append((cta_p, cum_t, cum_t + CTA_DURATION, False, True))
-                cum_t += CTA_DURATION
-                cta_inserted.add(ci)
-                print(f"  [CTA {ci+1}/3 inserted at {cum_t:.1f}s]")
+        if ci not in cta_inserted and abs(cum_t - ct) < dur:
+            cta_inserted.add(ci)
+            # CTA will be overlaid on this clip after encoding — flag it
+            clip["cta_overlay"] = True
+            print(f"  [CTA {ci+1}/3 will overlay clip {i} at {cum_t:.1f}s]")
 
     # ── Use cached segment if available ───────────────────────────────────
     if os.path.exists(seg_p) and get_dur(seg_p) >= dur * 0.80:
@@ -506,6 +518,11 @@ for i, clip in enumerate(CLIPS):
     ok = make_seg(raw_p, seg_p, dur, start_offset=best_t, ken_burns=kb)
 
     if ok:
+        # Apply CTA overlay if flagged
+        if clip.get("cta_overlay"):
+            cta_out = seg_p.replace(".mp4","_cta.mp4")
+            if apply_cta_overlay(seg_p, cta_out, duration=dur):
+                seg_p = cta_out
         timeline.append((seg_p, cum_t, cum_t+dur, clip["scene_last"], False))
         cum_t += dur
         seg_paths.append(seg_p); clip_scores.append(best_s)
@@ -514,14 +531,7 @@ for i, clip in enumerate(CLIPS):
 
     time.sleep(0.15)
 
-# Insert any remaining CTAs
-for ci, ct in enumerate(cta_times):
-    if ci not in cta_inserted:
-        cta_p = f"{CTADIR}/cta_{ci}.mp4"
-        if make_cta_video(cta_p, CTA_DURATION):
-            timeline.append((cta_p, cum_t, cum_t+CTA_DURATION, False, True))
-            cum_t += CTA_DURATION
-            print(f"  [CTA {ci+1}/3 appended]")
+# Note: CTAs are overlaid on clips, not appended as separate segments
 
 valid = [p for p,_,_,_,_ in timeline if p and os.path.exists(p)]
 avg_s = sum(clip_scores[i] for i in range(len(clip_scores)) if clip_scores[i] != 99) / max(1, sum(1 for s in clip_scores if s != 99))
@@ -556,24 +566,26 @@ vid_dur = get_dur(combined)
 print(f"Video duration: {int(vid_dur//60)}m{int(vid_dur%60):02d}s")
 
 # ── Mix audio + whoosh ────────────────────────────────────────────────────────
-print(f"Mixing audio with {len(whoosh_ts_ms)} whoosh sounds…")
-ai = ["-i", AUDIO]
-fp, mi = [], ["[0:a]"]
-for j, t in enumerate(whoosh_ts_ms):
-    ai += ["-i", WHOOSH]
-    fp.append(f"[{j+1}:a]adelay={t}|{t},volume=0.42[w{j}]")
-    mi.append(f"[w{j}]")
-
-n_mix = 1 + len(whoosh_ts_ms)
-fc = (";".join(fp) + (";" if fp else "")) + "".join(mi) + f"amix=inputs={n_mix}:normalize=0[aout]"
-
 mixed = f"{WORK}/mixed.aac"
-r = subprocess.run([FFMPEG,"-y"] + ai +
-                   ["-filter_complex", fc, "-map","[aout]",
-                    "-c:a","aac","-b:a","128k","-t", f"{vid_dur:.3f}", mixed],
-                   capture_output=True)
-if r.returncode != 0:
-    print("AUDIO MIX ERROR:", r.stderr.decode()[-300:])
+if WHOOSH and whoosh_ts_ms:
+    print(f"Mixing audio with {len(whoosh_ts_ms)} whoosh sounds…")
+    ai = ["-i", AUDIO]
+    fp, mi = [], ["[0:a]"]
+    for j, t in enumerate(whoosh_ts_ms):
+        ai += ["-i", WHOOSH]
+        fp.append(f"[{j+1}:a]adelay={t}|{t},volume=0.42[w{j}]")
+        mi.append(f"[w{j}]")
+    n_mix = 1 + len(whoosh_ts_ms)
+    fc = (";".join(fp) + (";" if fp else "")) + "".join(mi) + f"amix=inputs={n_mix}:normalize=0[aout]"
+    r = subprocess.run([FFMPEG,"-y"] + ai +
+                       ["-filter_complex", fc, "-map","[aout]",
+                        "-c:a","aac","-b:a","128k","-t", f"{vid_dur:.3f}", mixed],
+                       capture_output=True)
+    if r.returncode != 0:
+        print("AUDIO MIX ERROR:", r.stderr.decode()[-300:])
+        mixed = AUDIO
+else:
+    print("Skipping whoosh mix — using voiceover only.")
     mixed = AUDIO
 
 # ── Final mux ─────────────────────────────────────────────────────────────────
