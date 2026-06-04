@@ -362,22 +362,18 @@ def build_xfade_chain(seg_paths, output):
     for p in seg_paths:
         inputs += ["-i", p]
 
-    # Each clip's effective duration shrinks by XFADE_DURATION due to overlap
-    offset = None  # computed per-clip using actual durations
+    # Pre-compute all durations
+    durations = [get_dur(p) for p in seg_paths]
+
+    # xfade offset = cumulative sum of (dur - XFADE_DURATION) for all prior clips
+    # This is the timestamp in the output stream where the next transition starts
     filter_parts = []
     cum_offset = 0.0
     for i in range(n - 1):
-        dur_i = get_dur(seg_paths[i])
-        if i == 0:
-            in_a = "[0:v]"
-            in_b = "[1:v]"
-            cum_offset = dur_i - XFADE_DURATION
-        else:
-            in_a = f"[xf{i-1}]"
-            in_b = f"[{i+1}:v]"
-            dur_i = get_dur(seg_paths[i])
-            cum_offset += dur_i - XFADE_DURATION
+        in_a = "[0:v]" if i == 0 else f"[xf{i-1}]"
+        in_b = f"[{i+1}:v]"
         out_label = f"[xf{i}]" if i < n - 2 else "[vout]"
+        cum_offset += durations[i] - XFADE_DURATION
         filter_parts.append(
             f"{in_a}{in_b}xfade=transition=slideleft:"
             f"duration={XFADE_DURATION}:offset={cum_offset:.3f}{out_label}"
@@ -854,12 +850,15 @@ else:
     mixed = AUDIO
 
 # ── Final mux with end fade-to-black ─────────────────────────────────────────
+# Use audio duration as the master length — trim video to match
 print(f"Muxing → {OUTPUT}")
-fade_out_start = max(0, vid_dur - 1.5)
+audio_dur = get_dur(AUDIO)
+fade_out_start = max(0, audio_dur - 1.5)
 r = subprocess.run([FFMPEG,"-y",
                     "-i", combined, "-i", mixed,
                     "-filter_complex",
-                    (f"[0:v]fade=out:st={fade_out_start:.3f}:d=1.5[vout];"
+                    (f"[0:v]trim=end={audio_dur:.3f},setpts=PTS-STARTPTS,"
+                     f"fade=out:st={fade_out_start:.3f}:d=1.5[vout];"
                      f"[1:a]afade=t=out:st={fade_out_start:.3f}:d=1.5[aout]"),
                     "-map","[vout]","-map","[aout]",
                     "-c:v","libx264","-preset","fast","-crf","21",
