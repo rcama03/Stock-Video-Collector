@@ -241,6 +241,35 @@ def search_shutterstock(queries, min_dur, top_n=6):
         time.sleep(0.1)
     return results
 
+def search_mixkit(queries, min_dur, top_n=6):
+    """Scrape Mixkit free stock video search results."""
+    results = []
+    for query in queries:
+        try:
+            slug = query.replace(" ", "-").lower()
+            r = requests.get(f"https://mixkit.co/free-stock-video/{slug}/",
+                             headers={"User-Agent":"Mozilla/5.0"},
+                             timeout=20)
+            if r.status_code != 200: continue
+            html = r.text
+            # Extract video IDs
+            import re as _re
+            ids = _re.findall(r'assets\.mixkit\.co/videos/(\d+)/\1-(?:720|1080)\.mp4', html)
+            for vid_id in ids:
+                vid = f"mx_{vid_id}"
+                if vid in used_ids: continue
+                # Build URLs
+                src   = f"https://assets.mixkit.co/videos/{vid_id}/{vid_id}-720.mp4"
+                thumb = f"https://assets.mixkit.co/videos/{vid_id}/{vid_id}-thumb-360-0.jpg"
+                # Check duration via quick HEAD request not feasible — assume 10-30s
+                dur = 15
+                if dur >= min_dur:
+                    results.append((src, vid, dur, thumb))
+                if len(results) >= top_n: return results
+        except Exception: pass
+        time.sleep(0.1)
+    return results
+
 def best_candidate(candidates, desc):
     """Step 1: CLIP-score all candidate thumbnails, return best (url, vid, dur)."""
     if not candidates:
@@ -558,6 +587,7 @@ for i, clip in enumerate(CLIPS):
     candidates += search_coverr(queries[:1], min_src, top_n=4)
     candidates += search_freepik(queries[:1], min_src, top_n=6)
     candidates += search_shutterstock(queries[:1], min_src, top_n=6)
+    candidates += search_mixkit(queries[:1], min_src, top_n=6)
 
     url, vid, src_dur = best_candidate(candidates, desc)
 
