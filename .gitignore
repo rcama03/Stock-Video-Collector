@@ -12,3 +12,4 @@ venv/
 *.bak
 CLAUDE.md
 api_keys.env
+*.mp4
