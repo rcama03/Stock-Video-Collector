@@ -13,6 +13,7 @@ Features (from pipeline_config.py):
 """
 
 import os, sys, re, time, json, subprocess, requests, torch, textwrap
+import anthropic
 from PIL import Image, ImageDraw, ImageFont
 from transformers import CLIPModel, CLIPProcessor
 import numpy as np
@@ -40,6 +41,11 @@ PIXABAY_KEY      = os.getenv("PIXABAY_API_KEY")
 COVERR_KEY       = os.getenv("COVERR_API_KEY")
 FREEPIK_KEY      = os.getenv("FREEPIK_API_KEY")
 SHUTTERSTOCK_KEY = os.getenv("SHUTTERSTOCK_API_KEY")
+ANTHROPIC_KEY    = os.getenv("ANTHROPIC_API_KEY")
+
+# B-roll config
+BROLL_EVERY_N_CLIPS = 4    # insert b-roll after every N main clips
+BROLL_DURATION      = 2.0  # seconds per b-roll cutaway
 
 CLIP_MIN_DUR  = 4.0
 CLIP_MAX_DUR  = 7.0
@@ -75,6 +81,34 @@ def clip_score(image_path, text):
         return float((img_emb @ txt_emb.T).squeeze())
     except Exception:
         return 0.0
+
+_anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY) if ANTHROPIC_KEY else None
+_broll_cache = {}
+
+def get_broll_queries(scene_text):
+    """Use Claude to generate 3 b-roll cutaway search queries for a scene."""
+    if scene_text in _broll_cache:
+        return _broll_cache[scene_text]
+    if not _anthropic_client:
+        return []
+    try:
+        msg = _anthropic_client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=120,
+            messages=[{"role":"user","content":
+                f"""Given this voiceover scene text (German aviation/travel video):
+"{scene_text}"
+
+Generate exactly 3 short English search queries for close-up b-roll cutaway shots that visually match this scene.
+Rules: each query max 5 words, focus on close-up detail shots, no people's faces.
+Reply with ONLY 3 lines, one query per line, nothing else."""}]
+        )
+        queries = [l.strip() for l in msg.content[0].text.strip().split("\n") if l.strip()][:3]
+        _broll_cache[scene_text] = queries
+        return queries
+    except Exception as e:
+        print(f"  B-roll query error: {e}")
+        return []
 
 def clip_score_url(url, text):
     """Download thumbnail and CLIP-score it."""
@@ -635,6 +669,27 @@ for i, clip in enumerate(CLIPS):
         timeline.append((seg_p, cum_t, cum_t+dur, clip["scene_last"], False))
         cum_t += dur
         seg_paths.append(seg_p); clip_scores.append(best_s)
+
+        # ── B-roll cutaway every N clips ──────────────────────────────────
+        if (i + 1) % BROLL_EVERY_N_CLIPS == 0:
+            broll_queries = get_broll_queries(clip["desc"])
+            if broll_queries:
+                br_candidates = []
+                br_candidates += search_pexels(broll_queries, BROLL_DURATION, top_n=6)
+                br_candidates += search_pixabay(broll_queries, BROLL_DURATION, top_n=4)
+                br_candidates += search_mixkit(broll_queries[:1], BROLL_DURATION, top_n=3)
+                br_url, br_vid, br_src_dur = best_candidate(br_candidates, broll_queries[0])
+                if br_url and br_vid not in used_ids:
+                    used_ids.add(br_vid)
+                    br_raw = f"{RAWDIR}/br{i:04d}_{br_vid}.mp4"
+                    br_seg = f"{SEGDIR}/br{i:04d}.mp4"
+                    if download(br_url, br_raw):
+                        bd = get_dur(br_raw) or br_src_dur
+                        bt, _ = best_offset(br_raw, broll_queries[0], BROLL_DURATION, bd)
+                        if make_seg(br_raw, br_seg, BROLL_DURATION, start_offset=bt):
+                            timeline.append((br_seg, cum_t, cum_t+BROLL_DURATION, False, False))
+                            cum_t += BROLL_DURATION
+                            print(f"  [B-roll: {broll_queries[0][:40]}]")
     else:
         print(f"  encode failed"); seg_paths.append(None)
 
