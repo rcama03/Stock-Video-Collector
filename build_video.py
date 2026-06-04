@@ -647,26 +647,8 @@ print(f"Video duration: {int(vid_dur//60)}m{int(vid_dur%60):02d}s")
 
 # ── Mix audio + whoosh ────────────────────────────────────────────────────────
 mixed = f"{WORK}/mixed.aac"
-if WHOOSH and whoosh_ts_ms:
-    print(f"Mixing audio with {len(whoosh_ts_ms)} whoosh sounds…")
-    ai = ["-i", AUDIO]
-    fp, mi = [], ["[0:a]"]
-    for j, t in enumerate(whoosh_ts_ms):
-        ai += ["-i", WHOOSH]
-        fp.append(f"[{j+1}:a]adelay={t}|{t},volume=0.42[w{j}]")
-        mi.append(f"[w{j}]")
-    n_mix = 1 + len(whoosh_ts_ms)
-    fc = (";".join(fp) + (";" if fp else "")) + "".join(mi) + f"amix=inputs={n_mix}:normalize=0[aout]"
-    r = subprocess.run([FFMPEG,"-y"] + ai +
-                       ["-filter_complex", fc, "-map","[aout]",
-                        "-c:a","aac","-b:a","128k","-t", f"{vid_dur:.3f}", mixed],
-                       capture_output=True)
-    if r.returncode != 0:
-        print("AUDIO MIX ERROR:", r.stderr.decode()[-300:])
-        mixed = AUDIO
-else:
-    print("Skipping whoosh mix — using voiceover only.")
-    mixed = AUDIO
+print("Whoosh disabled — using voiceover only.")
+mixed = AUDIO
 
 # ── Final mux with end fade-to-black ─────────────────────────────────────────
 print(f"Muxing → {OUTPUT}")
