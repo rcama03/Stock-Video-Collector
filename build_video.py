@@ -334,23 +334,12 @@ def best_offset(raw_path, text, needed_dur, src_dur):
     return best_t, best_s
 
 # ── Segment encoding ──────────────────────────────────────────────────────────
+XFADE_DURATION = 0.4   # seconds overlap for slideleft xfade between every clip
+
 def make_seg(src, dst, duration, start_offset=0.0, scene_last=False, ken_burns=False, zpunch_t=None):
-    """Encode a single video segment. Scene-last clips get fade-out; all clips get fade-in."""
-    FADE_IN_F  = 8                          # 8 frames fade-in on every clip
-    FADE_OUT_F = 8                          # 8 frames fade-out on scene-last clips
-    fade_out_st = max(0, duration - FADE_OUT_F/30)
-
-    vf_parts = [
-        f"scale=1280:720:force_original_aspect_ratio=decrease",
-        f"pad=1280:720:(ow-iw)/2:(oh-ih)/2:black",
-        f"setsar=1",
-        f"fade=in:0:{FADE_IN_F}",
-    ]
-    if scene_last:
-        vf_parts.append(f"fade=out:st={fade_out_st:.3f}:d={FADE_OUT_F/30:.3f}")
-
-    # Ken Burns (zoompan) skipped — freezes video input on first frame
-    vf = ",".join(vf_parts)
+    """Encode a single video segment. No fades baked in — xfade handles transitions."""
+    vf = ("scale=1280:720:force_original_aspect_ratio=decrease,"
+          "pad=1280:720:(ow-iw)/2:(oh-ih)/2:black,setsar=1")
     cmd = [FFMPEG,"-y",
            "-ss", f"{start_offset:.3f}",
            "-i", src,
@@ -359,6 +348,89 @@ def make_seg(src, dst, duration, start_offset=0.0, scene_last=False, ken_burns=F
            "-r","30","-c:v","libx264","-preset","fast","-crf","23",
            "-an", dst]
     return subprocess.run(cmd, capture_output=True).returncode == 0
+
+
+def build_xfade_chain(seg_paths, output):
+    """Chain all segments with slideleft xfade transitions."""
+    n = len(seg_paths)
+    if n == 0:
+        return False
+    if n == 1:
+        import shutil; shutil.copy(seg_paths[0], output); return True
+
+    inputs = []
+    for p in seg_paths:
+        inputs += ["-i", p]
+
+    # Each clip's effective duration shrinks by XFADE_DURATION due to overlap
+    offset = None  # computed per-clip using actual durations
+    filter_parts = []
+    cum_offset = 0.0
+    for i in range(n - 1):
+        dur_i = get_dur(seg_paths[i])
+        if i == 0:
+            in_a = "[0:v]"
+            in_b = "[1:v]"
+            cum_offset = dur_i - XFADE_DURATION
+        else:
+            in_a = f"[xf{i-1}]"
+            in_b = f"[{i+1}:v]"
+            dur_i = get_dur(seg_paths[i])
+            cum_offset += dur_i - XFADE_DURATION
+        out_label = f"[xf{i}]" if i < n - 2 else "[vout]"
+        filter_parts.append(
+            f"{in_a}{in_b}xfade=transition=slideleft:"
+            f"duration={XFADE_DURATION}:offset={cum_offset:.3f}{out_label}"
+        )
+
+    r = subprocess.run(
+        [FFMPEG,"-y"] + inputs + [
+            "-filter_complex", ";".join(filter_parts),
+            "-map","[vout]",
+            "-c:v","libx264","-preset","fast","-crf","21","-r","30",
+            output],
+        capture_output=True)
+    if r.returncode != 0:
+        print("XFADE ERROR:", r.stderr.decode()[-400:])
+    return r.returncode == 0
+
+
+def make_soft_whoosh(dst, duration=0.6):
+    """Generate a soft whoosh SFX (300→1800Hz sweep, gentle envelope)."""
+    expr = "sin(2*PI*(300+1500*t/0.6)*t)*0.5*exp(-2.5*t/0.6)"
+    cmd = [FFMPEG,"-y","-f","lavfi",
+           "-i",f"aevalsrc={expr}:s=44100:c=mono:d={duration}",
+           "-c:a","aac","-b:a","128k", dst]
+    return subprocess.run(cmd, capture_output=True).returncode == 0
+
+
+def build_whoosh_track(transition_times, total_dur, dst, volume=0.45):
+    """Build a stereo audio track with soft whoosh at each transition timestamp."""
+    whoosh_file = f"{WORK}/whoosh_single.aac"
+    if not make_soft_whoosh(whoosh_file):
+        return False
+
+    audio_inputs = ["-f","lavfi","-i",
+                    f"aevalsrc=0:s=44100:c=stereo:d={total_dur:.3f}"]
+    afilt = ["[0:a]anull[base]"]
+    for j, ts in enumerate(transition_times):
+        ms = int(ts * 1000)
+        audio_inputs += ["-i", whoosh_file]
+        afilt.append(f"[{j+1}:a]adelay={ms}|{ms}[sw{j}]")
+    mix_in = "[base]" + "".join(f"[sw{j}]" for j in range(len(transition_times)))
+    afilt.append(
+        f"{mix_in}amix=inputs={1+len(transition_times)}:normalize=0,"
+        f"volume={volume}[aout]"
+    )
+    r = subprocess.run(
+        [FFMPEG,"-y"] + audio_inputs + [
+            "-filter_complex", ";".join(afilt),
+            "-map","[aout]","-c:a","aac","-b:a","128k",
+            "-t",f"{total_dur:.3f}", dst],
+        capture_output=True)
+    if r.returncode != 0:
+        print("WHOOSH TRACK ERROR:", r.stderr.decode()[-300:])
+    return r.returncode == 0
 
 # ── CTA card generation ───────────────────────────────────────────────────────
 FONT_REG  = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
@@ -702,39 +774,49 @@ valid = [p for p,_,_,_,_ in timeline if p and os.path.exists(p)]
 avg_s = sum(clip_scores[i] for i in range(len(clip_scores)) if clip_scores[i] != 99) / max(1, sum(1 for s in clip_scores if s != 99))
 print(f"\nValid segments: {len(valid)}  avg CLIP score: {avg_s:.3f}")
 
-# ── Whoosh timestamps ─────────────────────────────────────────────────────────
-whoosh_ts_ms = []
-t_acc = 0.0
-for seg_p, t_start, t_end, is_whoosh, is_cta in timeline:
-    if is_whoosh and not is_cta:
-        whoosh_ts_ms.append(int(t_acc * 1000))
-    t_acc += (t_end - t_start)
+# ── Collect valid segments and compute transition timestamps ──────────────────
+valid_segs = [p for p,_,_,_,_ in timeline if p and os.path.exists(p)]
+print(f"\nValid segments: {len(valid_segs)}  avg CLIP score: {avg_s:.3f}")
 
-print(f"Whoosh at {len(whoosh_ts_ms)} scene transitions")
+# Transition timestamps = cumulative duration at each clip boundary (for whoosh)
+transition_times = []
+acc = 0.0
+for idx, (seg_p,_,_,_,_) in enumerate(timeline):
+    if seg_p and os.path.exists(seg_p):
+        d = get_dur(seg_p)
+        if idx < len(valid_segs) - 1:
+            # xfade offset: transition fires at acc + d - XFADE_DURATION
+            transition_times.append(acc + d - XFADE_DURATION)
+        acc += d - XFADE_DURATION  # effective advance per clip in xfade chain
 
-# ── Concatenate all segments ──────────────────────────────────────────────────
-# Transitions are baked into clips: fade-in on every clip, fade-out on scene-last clips
-concat_f = f"{WORK}/concat.txt"
-with open(concat_f,"w") as f:
-    for seg_p, *_ in timeline:
-        if seg_p and os.path.exists(seg_p):
-            f.write(f"file '{seg_p}'\n")
-
+# ── Build xfade chain ─────────────────────────────────────────────────────────
 combined = f"{WORK}/combined.mp4"
-print(f"Concatenating {len(timeline)} segments…")
-r = subprocess.run([FFMPEG,"-y","-f","concat","-safe","0","-i",concat_f,
-                    "-c:v","libx264","-preset","fast","-crf","21", combined],
-                   capture_output=True)
-if r.returncode != 0:
-    print("CONCAT ERROR:", r.stderr.decode()[-400:]); sys.exit(1)
+print(f"Building xfade chain for {len(valid_segs)} segments…")
+if not build_xfade_chain(valid_segs, combined):
+    sys.exit(1)
 
 vid_dur = get_dur(combined)
 print(f"Video duration: {int(vid_dur//60)}m{int(vid_dur%60):02d}s")
 
-# ── Mix audio + whoosh ────────────────────────────────────────────────────────
-mixed = f"{WORK}/mixed.aac"
-print("Whoosh disabled — using voiceover only.")
-mixed = AUDIO
+# ── Build soft whoosh SFX track ───────────────────────────────────────────────
+whoosh_track = f"{WORK}/whoosh_track.aac"
+print(f"Building soft whoosh track ({len(transition_times)} transitions)…")
+has_whoosh = build_whoosh_track(transition_times, vid_dur, whoosh_track)
+
+# ── Mix voiceover + whoosh SFX ────────────────────────────────────────────────
+if has_whoosh:
+    mixed = f"{WORK}/mixed.aac"
+    r = subprocess.run([FFMPEG,"-y",
+                        "-i", AUDIO, "-i", whoosh_track,
+                        "-filter_complex",
+                        "[0:a][1:a]amix=inputs=2:normalize=0[aout]",
+                        "-map","[aout]","-c:a","aac","-b:a","128k", mixed],
+                       capture_output=True)
+    if r.returncode != 0:
+        print("AUDIO MIX ERROR — using voiceover only")
+        mixed = AUDIO
+else:
+    mixed = AUDIO
 
 # ── Final mux with end fade-to-black ─────────────────────────────────────────
 print(f"Muxing → {OUTPUT}")
