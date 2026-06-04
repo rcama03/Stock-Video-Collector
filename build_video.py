@@ -775,26 +775,60 @@ valid = [p for p,_,_,_,_ in timeline if p and os.path.exists(p)]
 avg_s = sum(clip_scores[i] for i in range(len(clip_scores)) if clip_scores[i] != 99) / max(1, sum(1 for s in clip_scores if s != 99))
 print(f"\nValid segments: {len(valid)}  avg CLIP score: {avg_s:.3f}")
 
-# ── Collect valid segments and compute transition timestamps ──────────────────
+# ── Group timeline by scene, hard-concat within each scene ───────────────────
+# timeline entries: (seg_path, start_t, end_t, is_scene_last, is_cta)
+# We use is_scene_last to detect scene boundaries.
+
 valid_segs = [p for p,_,_,_,_ in timeline if p and os.path.exists(p)]
 print(f"\nValid segments: {len(valid_segs)}  avg CLIP score: {avg_s:.3f}")
 
-# Transition timestamps = cumulative duration at each clip boundary (for whoosh)
+# Group segments by scene — each group gets hard-concat into one scene video
+scene_groups = []   # list of lists of seg_paths
+current_group = []
+for seg_p, t_start, t_end, is_scene_last, is_cta in timeline:
+    if not seg_p or not os.path.exists(seg_p):
+        continue
+    current_group.append(seg_p)
+    if is_scene_last and current_group:
+        scene_groups.append(current_group)
+        current_group = []
+if current_group:
+    scene_groups.append(current_group)
+
+print(f"Scenes: {len(scene_groups)} — hard cuts within, slideleft xfade between scenes")
+
+# Hard-concat each scene group into a single scene video
+scene_videos = []
+for si, group in enumerate(scene_groups):
+    scene_out = f"{WORK}/scene_{si:03d}.mp4"
+    if len(group) == 1:
+        import shutil; shutil.copy(group[0], scene_out)
+    else:
+        concat_f = f"{WORK}/scene_{si:03d}_concat.txt"
+        with open(concat_f, "w") as f:
+            for p in group:
+                f.write(f"file '{p}'\n")
+        r = subprocess.run([FFMPEG,"-y","-f","concat","-safe","0","-i",concat_f,
+                            "-c:v","libx264","-preset","fast","-crf","21","-an",
+                            scene_out], capture_output=True)
+        if r.returncode != 0:
+            print(f"  scene {si} concat error: {r.stderr.decode()[-200:]}")
+            continue
+    scene_videos.append(scene_out)
+
+# ── Build xfade chain ONLY between scene videos ───────────────────────────────
+combined = f"{WORK}/combined.mp4"
+print(f"Building xfade chain for {len(scene_videos)} scenes…")
+if not build_xfade_chain(scene_videos, combined):
+    sys.exit(1)
+
+# Transition timestamps = at each scene boundary (for whoosh SFX)
 transition_times = []
 acc = 0.0
-for idx, (seg_p,_,_,_,_) in enumerate(timeline):
-    if seg_p and os.path.exists(seg_p):
-        d = get_dur(seg_p)
-        if idx < len(valid_segs) - 1:
-            # xfade offset: transition fires at acc + d - XFADE_DURATION
-            transition_times.append(acc + d - XFADE_DURATION)
-        acc += d - XFADE_DURATION  # effective advance per clip in xfade chain
-
-# ── Build xfade chain ─────────────────────────────────────────────────────────
-combined = f"{WORK}/combined.mp4"
-print(f"Building xfade chain for {len(valid_segs)} segments…")
-if not build_xfade_chain(valid_segs, combined):
-    sys.exit(1)
+for si, sv in enumerate(scene_videos[:-1]):
+    d = get_dur(sv)
+    transition_times.append(acc + d - XFADE_DURATION)
+    acc += d - XFADE_DURATION
 
 vid_dur = get_dur(combined)
 print(f"Video duration: {int(vid_dur//60)}m{int(vid_dur%60):02d}s")
@@ -847,12 +881,15 @@ print(f"   Size     : {size:.1f} MB")
 print(f"   Clips    : {len(valid)}")
 print(f"   Avg CLIP : {avg_s:.3f}")
 
-# ── Compress if over 100MB ────────────────────────────────────────────────────
-if size > 100:
-    compressed = OUTPUT.replace(".mp4","_compressed.mp4")
-    print(f"\nCompressing ({size:.0f}MB > 100MB)…")
+# ── Push-to-GitHub size: compress only if over 90MB, keep quality high ───────
+if size > 90:
+    compressed = OUTPUT.replace(".mp4","_gh.mp4")
+    print(f"\nCompressing for GitHub ({size:.0f}MB > 90MB)…")
     subprocess.run([FFMPEG,"-y","-i",OUTPUT,
-                    "-c:v","libx264","-crf","28","-preset","slow",
-                    "-c:a","aac","-b:a","96k", compressed], capture_output=True)
+                    "-c:v","libx264","-crf","24","-preset","slow",
+                    "-c:a","aac","-b:a","128k", compressed], capture_output=True)
     c_size = os.path.getsize(compressed)/1024/1024
-    print(f"   Compressed: {c_size:.1f} MB → {compressed}")
+    print(f"   GitHub copy: {c_size:.1f} MB → {compressed}")
+else:
+    compressed = OUTPUT
+    print(f"   Size OK for GitHub ({size:.1f}MB) — no compression needed")
