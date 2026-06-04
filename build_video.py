@@ -677,6 +677,7 @@ for i, clip in enumerate(CLIPS):
                 br_candidates = []
                 br_candidates += search_pexels(broll_queries, BROLL_DURATION, top_n=6)
                 br_candidates += search_pixabay(broll_queries, BROLL_DURATION, top_n=4)
+                br_candidates += search_coverr(broll_queries, BROLL_DURATION, top_n=4)
                 br_candidates += search_mixkit(broll_queries[:1], BROLL_DURATION, top_n=3)
                 br_url, br_vid, br_src_dur = best_candidate(br_candidates, broll_queries[0])
                 if br_url and br_vid not in used_ids:
