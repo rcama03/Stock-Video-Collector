@@ -20,8 +20,8 @@ import numpy as np
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 FFMPEG   = "/usr/local/lib/python3.11/dist-packages/imageio_ffmpeg/binaries/ffmpeg-linux-x86_64-v7.0.2"
-AUDIO    = sys.argv[1] if len(sys.argv) > 1 else "/root/.claude/uploads/3283cca4-5e95-460a-a316-bfbc10ec85e3/041d3127-full_voiceover.mp3"
-OUTPUT   = sys.argv[2] if len(sys.argv) > 2 else "/home/user/Stock-Video-Collector/lounge_video.mp4"
+AUDIO    = sys.argv[1] if len(sys.argv) > 1 else "/root/.claude/uploads/205d8901-daa9-424e-9222-23a4e0802cea/16953c3e-full_voiceover.mp3"
+OUTPUT   = sys.argv[2] if len(sys.argv) > 2 else "/home/user/Stock-Video-Collector/etias_video.mp4"
 WORK     = "/tmp/vbuild"
 RAWDIR   = f"{WORK}/raw"
 SEGDIR   = f"{WORK}/seg"
@@ -538,13 +538,12 @@ else:
     print("Whoosh SFX generated.")
 
 # ── Scene plan ────────────────────────────────────────────────────────────────
-# Scene boundaries computed from word counts proportionally against total duration
-# Total words: 1320  |  Total duration: 536.33s  |  Rate: 0.4063 s/word
+# ETIAS 2026 video — 34 scenes
+# Total words: 1469
 TOTAL_DUR = get_dur(AUDIO)
-RATE = TOTAL_DUR / 1320.0
+RATE = TOTAL_DUR / 1469.0
 
-SCENE_WORDS = [38,36,35,39,39,41,37,37,40,39,41,31,36,40,40,34,42,42,41,39,
-               37,39,46,42,45,45,42,42,37,43,39,48,48]
+SCENE_WORDS = [42,40,40,47,43,50,41,48,44,36,45,48,39,48,42,44,47,42,38,44,42,41,47,32,45,47,42,42,39,43,46,46,46,44]
 
 scene_starts = []
 t = 0.0
@@ -553,74 +552,76 @@ for w in SCENE_WORDS:
     t += w * RATE
 scene_ends = scene_starts[1:] + [round(TOTAL_DUR, 2)]
 
-# (desc, [queries]) per scene — pilot lies video
+# (desc, [queries]) per scene — ETIAS 2026 video
 SCENE_META = [
-    ("tired exhausted pilot cockpit airplane night",
-     ["tired exhausted pilot cockpit","pilot fatigue airplane controls night","cockpit pilot fatigued night flight"]),
-    ("pilot falling asleep cockpit airplane autopilot",
-     ["pilot sleeping cockpit airplane","pilot fatigue asleep flight cockpit","airplane autopilot cockpit fatigue pilot"]),
-    ("severe airplane turbulence cabin passengers shaking",
-     ["severe turbulence airplane shaking cabin","airplane turbulence passengers cabin","flight turbulence warning shaking"]),
-    ("pilot calm cockpit announcement turbulence passengers",
-     ["pilot calm cockpit controls announcement","pilot speaking passengers intercom airplane","pilot announcement calm turbulence flight"]),
-    ("exhausted airline crew long shift pilot fatigue",
-     ["tired airline crew airport shift","pilot exhausted fatigue long shift","airline crew tired fatigue long work"]),
-    ("pilot fatigue error critical statistics study",
-     ["pilot fatigue error aviation statistics","aviation safety study data chart","pilot error critical fatigue research"]),
-    ("pilot co-pilot airplane different meals food regulation",
-     ["pilot airplane food meal tray cockpit","airplane food service different meals","airline food different pilots safety rule"]),
-    ("pilot incapacitated food poisoning airplane emergency",
-     ["pilot emergency airplane food poisoning","airplane emergency landing cockpit help","flight emergency incapacitated pilot"]),
-    ("airplane technical defect MEL minimum equipment list",
-     ["airplane maintenance technical inspection defect","aircraft technical defect check system","aviation MEL defect system airplane"]),
-    ("FAA aviation regulations safety rules document",
-     ["aviation regulations safety FAA rules","airplane systems safety check regulations","aviation authority safety rules official"]),
-    ("pilot cockpit silent emergency secret passengers unaware",
-     ["pilot emergency cockpit secret silent","airplane emergency cockpit crew action","flight technical emergency cockpit hidden"]),
-    ("airplane hydraulic engine pressure emergency silent cabin",
-     ["airplane hydraulic system emergency","aircraft engine problem emergency cabin","airplane cabin pressure loss emergency"]),
-    ("pilot emergency training simulator calm cockpit",
-     ["pilot emergency training simulator calm","pilot calm training cockpit professional","aviation emergency training pilot cockpit"]),
-    ("airplane emergency evacuation exit blocked passengers",
-     ["airplane emergency exit evacuation blocked","passengers emergency exit airplane evacuation","aircraft emergency evacuation exit row"]),
-    ("airplane cabin air ventilation bleed air engine",
-     ["airplane cabin air ventilation engine","aircraft bleed air ventilation system","airplane air supply engine duct cabin"]),
-    ("toxic chemical fumes airplane cabin aerotoxic",
-     ["toxic fumes airplane cabin chemical air","aerotoxic syndrome airplane cabin air","chemical contamination airplane air fumes"]),
-    ("oxygen mask airplane cabin drop emergency",
-     ["oxygen mask airplane cabin emergency drop","airplane emergency oxygen mask passenger","oxygen mask breathing airplane cabin"]),
-    ("airplane altitude pressure loss cockpit emergency",
-     ["airplane altitude pressure emergency cockpit","aircraft cabin pressure loss altitude","high altitude pressure airplane emergency"]),
-    ("flight attendant safety demonstration passengers listening",
-     ["flight safety demonstration passengers attention","airline safety briefing passengers listen","flight attendant safety speech airplane"]),
-    ("airplane safe landing runway arrival airport",
-     ["airplane safe landing runway arrival","aircraft landing airport runway touchdown","airplane touchdown runway safe landing"]),
-    ("pilot safety report document writing internal airline",
-     ["pilot safety report document writing","aviation safety report document internal","airline internal safety report pilot"]),
-    ("aviation safety system control information passenger",
-     ["aviation safety system airport control","airline safety system information control","aviation information safety system"]),
-    ("airplane flying safely statistics safest transport world",
-     ["airplane flying safely statistics transport","aviation safest transport statistics record","airplane flight safety statistics world"]),
-    ("pilot professional training cockpit calm years",
-     ["pilot professional training cockpit calm","airline pilot training academy simulator","pilot cockpit professional trained calm"]),
-    ("passenger rights information transparency airline",
-     ["passenger information rights airport airline","airline passenger rights information transparent","traveler passenger rights airplane info"]),
-    ("airplane emergency exit row seat near door",
-     ["airplane emergency exit row seat","passenger near exit row airplane seat","aircraft emergency exit door row seat"]),
-    ("pilot flight simulator training hours cockpit",
-     ["pilot flight simulator training hours","airline pilot simulator cockpit training","aviation training simulator pilot hours"]),
-    ("airplane flying clouds data statistics information bubble",
-     ["airplane flying clouds statistics data","commercial flight safe statistics clouds","airline flight data information sky"]),
-    ("airplane cargo weight loading overbooked airport",
-     ["airplane loading weight airport cargo","aircraft weight cargo loading max","airplane maximum weight loading airport"]),
-    ("airplane autopilot cockpit controls flying pilot",
-     ["airplane autopilot cockpit controls","pilot autopilot engage cockpit system","aircraft autopilot system cockpit pilot"]),
-    ("aviation facts summary list safety airplane truth",
-     ["aviation facts summary list safety","airplane travel safety facts summary","flight safety information summary list"]),
-    ("confident informed passenger boarding airplane airport",
-     ["passenger boarding airplane confident informed","informed traveler airplane boarding gate","confident passenger airplane departure gate"]),
-    ("happy traveler subscribe aviation channel content",
-     ["happy satisfied traveler airport success","content aviation travel knowledge channel","travel channel aviation subscribe happy"]),
+    ("traveler shocked denied boarding airport passport check",
+     ["traveler denied boarding airport passport","passenger stopped airport entry denied","airport gate denied boarding traveler"]),
+    ("EU digital travel permit form online ETIAS",
+     ["EU digital travel permit online form","online travel authorization form Europe","ETIAS digital application form laptop"]),
+    ("Schengen border control Europe passport stamp digital",
+     ["Schengen border passport control Europe","European border control passport digital","Schengen area passport entry control"]),
+    ("German passport EU citizen travel free border",
+     ["German passport EU citizen travel","EU passport free travel Schengen border","European citizen passport border free"]),
+    ("crowd travelers airport massive immigration statistics",
+     ["massive crowd travelers airport terminal","large group tourists airport immigration","busy airport terminal crowd travelers"]),
+    ("person filling online form laptop travel permit",
+     ["person laptop online travel application form","online form filling digital permit laptop","travel application form digital laptop"]),
+    ("travel form error mistake rejection denied",
+     ["travel form error mistake denied","application form wrong entry mistake","online form rejection error travel"]),
+    ("border control security check database passport scan",
+     ["border security passport scan database","security database passport check border","immigration border control passport scan"]),
+    ("traveler manual security check suspicious border",
+     ["traveler manual security inspection border","suspicious traveler security check border","immigration manual inspection traveler border"]),
+    ("security database Interpol Europol scan search",
+     ["Interpol Europol database security scan","security database criminal check Europol","law enforcement database check security"]),
+    ("ESTA US passport travel permit comparison",
+     ["ESTA US travel permit passport","US ESTA travel authorization form","American travel permit ESTA comparison"]),
+    ("rejected travel application appeal waiting frustrated traveler",
+     ["rejected travel application frustrated traveler","denied travel permit appeal waiting","travel application rejected appeal process"]),
+    ("calendar countdown travel planning deadline urgent",
+     ["calendar countdown travel deadline planning","travel planning calendar deadline urgent","trip planning countdown calendar date"]),
+    ("EU project delay bureaucracy office frustration",
+     ["EU bureaucracy office project delay","European project delay political office","government project delay bureaucracy frustration"]),
+    ("IT system failure computer crash digital error",
+     ["IT system failure computer crash error","digital system crash failure technical","computer system error crash technical"]),
+    ("family vacation Europe planning travel disrupted",
+     ["family vacation Europe travel planning","family travel Europe disrupted problem","vacation planning family Europe trip"]),
+    ("family travel cost money budget calculation",
+     ["family travel budget cost calculation","travel expense budget family money","family vacation cost money calculation"]),
+    ("fake website scam phishing travel permit fraud",
+     ["fake website scam phishing fraud","phishing travel permit scam website","online fraud fake travel application"]),
+    ("tourist competition Turkey UAE beach destination",
+     ["tourist beach Turkey UAE destination","alternative travel destination beach resort","beach resort tourism competitor Europe"]),
+    ("tourism statistics decline Europe economic impact",
+     ["tourism statistics decline economic impact","European tourism decline statistics chart","travel industry economic impact statistics"]),
+    ("UK ETA chaos airport queue system failure",
+     ["UK airport queue chaos ETA system","airport queue system failure chaos","UK border chaos ETA implementation"]),
+    ("airline booking system travel industry adapt",
+     ["airline booking system digital adapt","travel industry technology booking system","Lufthansa TUI booking system adapt"]),
+    ("EU rejection list vague rules bureaucracy document",
+     ["EU rejection bureaucracy document vague rules","government rejection list bureaucracy document","EU policy vague rules document list"]),
+    ("data privacy digital profile surveillance tracking",
+     ["data privacy digital surveillance tracking","personal data privacy digital profile","surveillance digital data privacy tracking"]),
+    ("child passport application travel documents family",
+     ["child passport application travel documents","family travel child documents passport","young child passport application form"]),
+    ("transit airport stopover connection flight layover",
+     ["transit airport stopover connection flight","airport layover connection transit flight","brief airport stopover transit traveler"]),
+    ("European microstate Andorra Monaco Vatican border",
+     ["Andorra Monaco Vatican microstate border","European microstate border exception policy","small state border Europe exception"]),
+    ("traveler checklist passport expiry preparation travel",
+     ["traveler checklist passport expiry preparation","passport expiry check travel preparation","travel checklist documents passport expiry"]),
+    ("EU surveillance digital monitoring border control",
+     ["EU digital surveillance border monitoring","European digital border monitoring system","surveillance digital border control EU"]),
+    ("Amnesty International human rights discrimination passport",
+     ["human rights discrimination passport country","Amnesty International rights passport travel","discrimination passport country human rights"]),
+    ("EU entry exit system EES digital tracking border",
+     ["EU entry exit system digital tracking","EES border digital tracking entry exit","European entry exit tracking system border"]),
+    ("summary checklist travel Europe preparation ETIAS",
+     ["summary checklist Europe travel preparation","travel Europe checklist important tips","ETIAS travel preparation summary checklist"]),
+    ("traveler airport gate last minute permit revoked",
+     ["traveler airport gate last minute problem","traveler denied gate airport last minute","airport gate revoked permit traveler shocked"]),
+    ("subscribe channel travel tips aviation knowledge",
+     ["travel tips channel subscribe knowledge","travel information channel subscribe bell","aviation travel knowledge subscribe channel"]),
 ]
 
 # ── Build clip list (4-7s sub-clips per scene) ────────────────────────────────
