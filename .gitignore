@@ -13,4 +13,4 @@ venv/
 CLAUDE.md
 api_keys.env
 *.mp4
-!cta_test.mp4
+!cta_preview_v2.mp4
