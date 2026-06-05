@@ -454,7 +454,7 @@ def make_cta_card_png():
 
     # Dark translucent rounded background
     d.rounded_rectangle([0, 0, CTA_CARD_W-1, CTA_CARD_H-1],
-                        radius=12, fill=(15, 15, 25, 200))
+                        radius=12, fill=(255, 255, 255, 180))
 
     # Gold accent line on left edge
     d.rounded_rectangle([0, 0, 5, CTA_CARD_H-1], radius=4, fill=(255, 180, 0, 255))
@@ -474,10 +474,9 @@ def make_cta_card_png():
     start_x = (CTA_CARD_W - total_w) // 2 + 8  # +8 to account for gold line
     cy      = CTA_CARD_H // 2
 
-    # Text with subtle shadow
+    # Text
     ty = cy - th // 2
-    d.text((start_x+1, ty+1), CTA_TEXT, font=font, fill=(0,0,0,140))
-    d.text((start_x,   ty),   CTA_TEXT, font=font, fill="white")
+    d.text((start_x,   ty),   CTA_TEXT, font=font, fill=(20, 20, 20, 255))
 
     # Red ABONNIEREN button
     bx = start_x + tw + gap
