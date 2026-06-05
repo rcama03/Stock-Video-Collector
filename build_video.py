@@ -434,45 +434,55 @@ FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
 CTA_TEXT     = "Verpasse Keine Folge"
 CTA_BTN_TEXT = "ABONNIEREN"
-CTA_STRIP_Y  = 560   # vertical position of strip in 720p frame
 
-def make_cta_overlay_png():
-    """Generate fully transparent CTA strip PNG — text + button on single line."""
-    png = f"{CTADIR}/cta_overlay.png"
+# CTA card dimensions — top-right sliding card
+CTA_CARD_W   = 640
+CTA_CARD_H   = 110
+CTA_CARD_Y   = 20    # distance from top of frame
+CTA_SLIDE_IN = 0.35  # seconds to slide in
+CTA_HOLD     = 1.0   # seconds to hold
+CTA_SLIDE_OUT= 0.35  # seconds to slide out
+
+def make_cta_card_png():
+    """Generate 640x110 dark translucent CTA card PNG."""
+    png = f"{CTADIR}/cta_card.png"
     if os.path.exists(png):
         return png
 
-    strip_h = 100
-    img = Image.new("RGBA", (1280, strip_h), (0, 0, 0, 0))
+    img = Image.new("RGBA", (CTA_CARD_W, CTA_CARD_H), (0, 0, 0, 0))
     d   = ImageDraw.Draw(img)
 
-    font  = ImageFont.truetype(FONT_REG,  38)
-    bfont = ImageFont.truetype(FONT_BOLD, 34)
+    # Dark translucent rounded background
+    d.rounded_rectangle([0, 0, CTA_CARD_W-1, CTA_CARD_H-1],
+                        radius=12, fill=(15, 15, 25, 200))
 
-    # Gold accent line at top
-    d.rectangle([0, 0, 1280, 4], fill=(255, 180, 0, 255))
+    # Gold accent line on left edge
+    d.rounded_rectangle([0, 0, 5, CTA_CARD_H-1], radius=4, fill=(255, 180, 0, 255))
 
-    # Measure text and button
-    tbbox = d.textbbox((0, 0), CTA_TEXT, font=font)
+    font  = ImageFont.truetype(FONT_REG,  34)
+    bfont = ImageFont.truetype(FONT_BOLD, 30)
+
+    tbbox = d.textbbox((0,0), CTA_TEXT, font=font)
     tw, th = tbbox[2]-tbbox[0], tbbox[3]-tbbox[1]
-    sbbox = d.textbbox((0, 0), CTA_BTN_TEXT, font=bfont)
+    sbbox = d.textbbox((0,0), CTA_BTN_TEXT, font=bfont)
     stw, sth = sbbox[2]-sbbox[0], sbbox[3]-sbbox[1]
-    btn_w, btn_h = stw + 50, th + 16
+    btn_w = stw + 36
+    btn_h = th + 12
 
-    gap     = 30
+    gap     = 20
     total_w = tw + gap + btn_w
-    start_x = (1280 - total_w) // 2
-    cy      = strip_h // 2
+    start_x = (CTA_CARD_W - total_w) // 2 + 8  # +8 to account for gold line
+    cy      = CTA_CARD_H // 2
 
-    # Text with shadow
-    ty = cy - th // 2 + 4
-    d.text((start_x+2, ty+2), CTA_TEXT, font=font, fill=(0, 0, 0, 180))
+    # Text with subtle shadow
+    ty = cy - th // 2
+    d.text((start_x+1, ty+1), CTA_TEXT, font=font, fill=(0,0,0,140))
     d.text((start_x,   ty),   CTA_TEXT, font=font, fill="white")
 
-    # Button
+    # Red ABONNIEREN button
     bx = start_x + tw + gap
-    by = cy - btn_h // 2 + 4
-    d.rounded_rectangle([bx, by, bx+btn_w, by+btn_h], radius=8, fill=(220, 0, 0, 255))
+    by = cy - btn_h // 2
+    d.rounded_rectangle([bx, by, bx+btn_w, by+btn_h], radius=7, fill=(220, 0, 0, 255))
     sx = bx + (btn_w - stw) // 2
     sy = by + (btn_h - sth) // 2
     d.text((sx, sy), CTA_BTN_TEXT, font=bfont, fill="white")
@@ -481,25 +491,37 @@ def make_cta_overlay_png():
     return png
 
 def apply_cta_overlay(src_seg, dst, duration=CTA_DURATION):
-    """Burn transparent CTA strip onto video frame using ffmpeg overlay filter."""
-    overlay_png = make_cta_overlay_png()
-    fade_f = max(1, int(0.15 * 30))
+    """Burn sliding CTA card onto video — slides in from top-right, holds, slides out."""
+    card_png = make_cta_card_png()
+
+    # x animation: starts off-screen right (1280), slides to (1280-CTA_CARD_W-10)=630
+    x_rest  = 1280 - CTA_CARD_W - 10   # resting x position (10px margin from right)
+    x_off   = 1280                       # off-screen x position
+
+    si = CTA_SLIDE_IN
+    ho = CTA_SLIDE_IN + CTA_HOLD
+    so = CTA_SLIDE_IN + CTA_HOLD + CTA_SLIDE_OUT
+
+    # ffmpeg overlay x expression using if() for slide-in, hold, slide-out
+    x_expr = (
+        f"if(lt(t,{si}), {x_off}-({x_off}-{x_rest})*(t/{si}),"
+        f" if(lt(t,{ho}), {x_rest},"
+        f"  if(lt(t,{so}), {x_rest}+({x_off}-{x_rest})*((t-{ho})/{CTA_SLIDE_OUT}),"
+        f"   {x_off})))"
+    )
 
     r = subprocess.run([
         FFMPEG, "-y",
         "-i", src_seg,
-        "-i", overlay_png,
+        "-i", card_png,
         "-filter_complex",
-        (f"[0:v][1:v]overlay=0:{CTA_STRIP_Y}:format=auto,"
-         f"fade=in:0:{fade_f},"
-         f"fade=out:st={max(0,duration-0.15):.3f}:d=0.15[out]"),
+        f"[0:v][1:v]overlay=x='{x_expr}':y={CTA_CARD_Y}:format=auto[out]",
         "-map", "[out]",
         "-r","30","-c:v","libx264","-preset","fast","-crf","20",
         "-an", dst
     ], capture_output=True)
     if r.returncode != 0:
         print(f"  CTA overlay error: {r.stderr.decode()[-150:]}")
-        # fallback: just copy the segment without overlay
         import shutil; shutil.copy(src_seg, dst)
     return os.path.exists(dst)
 
