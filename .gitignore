@@ -14,4 +14,3 @@ CLAUDE.md
 api_keys.env
 *.mp4
 !cta_test.mp4
-!etias_video_small.mp4
