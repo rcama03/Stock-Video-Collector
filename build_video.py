@@ -58,7 +58,7 @@ ZPUNCH_SCALE  = 1.10
 ZPUNCH_DUR    = 0.3
 
 CTA_POSITIONS = [0.25, 0.50, 0.75]
-CTA_DURATION  = 5.7   # seconds (slide_in + hold + slide_out)
+CTA_DURATION  = 4.2   # seconds (slide_in + hold + slide_out)
 
 # ── CLIP model ───────────────────────────────────────────────────────────────
 print("Loading CLIP model…")
@@ -440,7 +440,7 @@ CTA_CARD_W   = 640
 CTA_CARD_H   = 110
 CTA_CARD_Y   = 20    # distance from top of frame
 CTA_SLIDE_IN = 0.35  # seconds to slide in
-CTA_HOLD     = 5.0   # seconds to hold
+CTA_HOLD     = 3.5   # seconds to hold (total ~4.2s fits within any 4-7s clip)
 CTA_SLIDE_OUT= 0.35  # seconds to slide out
 
 def make_cta_card_png():
@@ -689,15 +689,10 @@ for i, clip in enumerate(CLIPS):
     seg_p   = f"{SEGDIR}/s{i:04d}.mp4"
 
     # ── Check if CTA overlay should be applied to this clip ───────────────
-    CTA_MIN_DUR = CTA_SLIDE_IN + CTA_HOLD + CTA_SLIDE_OUT  # 5.7s
     for ci, ct in enumerate(cta_times):
         if ci not in cta_inserted and abs(cum_t - ct) < dur:
             cta_inserted.add(ci)
             clip["cta_overlay"] = True
-            # Extend clip duration to fit full CTA animation if needed
-            if dur < CTA_MIN_DUR:
-                clip["dur"] = CTA_MIN_DUR
-                dur = CTA_MIN_DUR
             print(f"  [CTA {ci+1}/3 will overlay clip {i} at {cum_t:.1f}s]")
 
     # ── Use cached segment if available ───────────────────────────────────
