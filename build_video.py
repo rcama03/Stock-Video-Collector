@@ -689,11 +689,15 @@ for i, clip in enumerate(CLIPS):
     seg_p   = f"{SEGDIR}/s{i:04d}.mp4"
 
     # ── Check if CTA overlay should be applied to this clip ───────────────
+    CTA_MIN_DUR = CTA_SLIDE_IN + CTA_HOLD + CTA_SLIDE_OUT  # 5.7s
     for ci, ct in enumerate(cta_times):
         if ci not in cta_inserted and abs(cum_t - ct) < dur:
             cta_inserted.add(ci)
-            # CTA will be overlaid on this clip after encoding — flag it
             clip["cta_overlay"] = True
+            # Extend clip duration to fit full CTA animation if needed
+            if dur < CTA_MIN_DUR:
+                clip["dur"] = CTA_MIN_DUR
+                dur = CTA_MIN_DUR
             print(f"  [CTA {ci+1}/3 will overlay clip {i} at {cum_t:.1f}s]")
 
     # ── Use cached segment if available ───────────────────────────────────
