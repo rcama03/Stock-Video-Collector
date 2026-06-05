@@ -58,7 +58,7 @@ ZPUNCH_SCALE  = 1.10
 ZPUNCH_DUR    = 0.3
 
 CTA_POSITIONS = [0.25, 0.50, 0.75]
-CTA_DURATION  = 1.5   # seconds
+CTA_DURATION  = 5.7   # seconds (slide_in + hold + slide_out)
 
 # ── CLIP model ───────────────────────────────────────────────────────────────
 print("Loading CLIP model…")
@@ -440,7 +440,7 @@ CTA_CARD_W   = 640
 CTA_CARD_H   = 110
 CTA_CARD_Y   = 20    # distance from top of frame
 CTA_SLIDE_IN = 0.35  # seconds to slide in
-CTA_HOLD     = 1.0   # seconds to hold
+CTA_HOLD     = 5.0   # seconds to hold
 CTA_SLIDE_OUT= 0.35  # seconds to slide out
 
 def make_cta_card_png():
@@ -454,7 +454,7 @@ def make_cta_card_png():
 
     # Dark translucent rounded background
     d.rounded_rectangle([0, 0, CTA_CARD_W-1, CTA_CARD_H-1],
-                        radius=12, fill=(255, 255, 255, 180))
+                        radius=12, fill=(15, 15, 25, 200))
 
     # Gold accent line on left edge
     d.rounded_rectangle([0, 0, 5, CTA_CARD_H-1], radius=4, fill=(255, 180, 0, 255))
@@ -476,7 +476,8 @@ def make_cta_card_png():
 
     # Text
     ty = cy - th // 2
-    d.text((start_x,   ty),   CTA_TEXT, font=font, fill=(20, 20, 20, 255))
+    d.text((start_x+1, ty+1), CTA_TEXT, font=font, fill=(0,0,0,140))
+    d.text((start_x,   ty),   CTA_TEXT, font=font, fill="white")
 
     # Red ABONNIEREN button
     bx = start_x + tw + gap
