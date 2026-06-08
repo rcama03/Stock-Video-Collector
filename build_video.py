@@ -71,11 +71,11 @@ def clip_score(image_path, text):
     """Return cosine similarity between image and text embeddings (0-1 scale)."""
     try:
         img = Image.open(image_path).convert("RGB")
-        img_inputs = _clip_proc(images=img, return_tensors="pt", padding=True)
-        txt_inputs = _clip_proc(text=[text], return_tensors="pt", padding=True)
+        inputs = _clip_proc(text=[text], images=img, return_tensors="pt", padding=True)
         with torch.no_grad():
-            img_emb = _clip_model.get_image_features(**img_inputs)
-            txt_emb = _clip_model.get_text_features(**txt_inputs)
+            out = _clip_model(**inputs)
+            img_emb = out.image_embeds
+            txt_emb = out.text_embeds
         img_emb = img_emb / img_emb.norm(dim=-1, keepdim=True)
         txt_emb = txt_emb / txt_emb.norm(dim=-1, keepdim=True)
         return float((img_emb @ txt_emb.T).squeeze())
