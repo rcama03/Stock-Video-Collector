@@ -40,7 +40,8 @@ PEXELS_KEY       = os.getenv("PEXELS_API_KEY")
 PIXABAY_KEY      = os.getenv("PIXABAY_API_KEY")
 COVERR_KEY       = os.getenv("COVERR_API_KEY")
 FREEPIK_KEY      = os.getenv("FREEPIK_API_KEY")
-SHUTTERSTOCK_KEY = os.getenv("SHUTTERSTOCK_API_KEY")
+SHUTTERSTOCK_CLIENT_ID     = os.getenv("SHUTTERSTOCK_CLIENT_ID")
+SHUTTERSTOCK_CLIENT_SECRET = os.getenv("SHUTTERSTOCK_CLIENT_SECRET")
 ANTHROPIC_KEY    = os.getenv("ANTHROPIC_API_KEY")
 
 # B-roll config
@@ -257,15 +258,18 @@ def search_freepik(queries, min_dur, top_n=6):
     return results
 
 def search_shutterstock(queries, min_dur, top_n=6):
+    import base64
+    creds = base64.b64encode(
+        f"{SHUTTERSTOCK_CLIENT_ID}:{SHUTTERSTOCK_CLIENT_SECRET}".encode()
+    ).decode()
     results = []
     for query in queries:
         try:
             r = requests.get("https://api.shutterstock.com/v2/videos/search",
-                             headers={"Authorization": f"Bearer {SHUTTERSTOCK_KEY}"},
+                             headers={"Authorization": f"Basic {creds}"},
                              params={"query": query, "per_page": 10,
                                      "min_duration": int(min_dur),
-                                     "aspect_ratio": "16_9",
-                                     "resolution": "hd"},
+                                     "aspect_ratio": "16_9"},
                              timeout=20)
             if r.status_code != 200: continue
             for v in r.json().get("data", []):
@@ -273,8 +277,7 @@ def search_shutterstock(queries, min_dur, top_n=6):
                 if vid in used_ids: continue
                 dur = v.get("duration", 0)
                 if dur < min_dur: continue
-                thumb = v.get("assets", {}).get("thumb_webm", {}).get("url", "")
-                # Shutterstock preview URLs (watermarked but usable for CLIP scoring)
+                thumb = v.get("assets", {}).get("thumb_jpg", {}).get("url", "")
                 src = v.get("assets", {}).get("preview_mp4", {}).get("url", "")
                 if src:
                     results.append((src, vid, dur, thumb))
