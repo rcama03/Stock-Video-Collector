@@ -203,18 +203,26 @@ def search_coverr(queries, min_dur, top_n=4):
     for query in queries:
         try:
             r = requests.get("https://api.coverr.co/videos",
-                             params={"token":COVERR_KEY,"query":query,"per_page":8},
+                             headers={"Authorization": f"Bearer {COVERR_KEY}"},
+                             params={"query":query,"per_page":8},
                              timeout=20)
             if r.status_code != 200: continue
             for v in r.json().get("hits",[]):
                 vid = f"cv_{v.get('id','')}"
                 if vid in used_ids: continue
-                dur = v.get("duration",0)
+                dur = float(v.get("duration") or 0)
                 if dur < min_dur: continue
-                src = (v.get("urls",{}).get("mp4_720") or
-                       v.get("urls",{}).get("mp4_1080") or
-                       v.get("mp4",""))
-                thumb = v.get("coverImageUrl","") or v.get("thumbnail","")
+                thumb = v.get("thumbnail","") or v.get("poster","")
+                # fetch detail to get download URL
+                vid_id = v.get("id","")
+                try:
+                    det = requests.get(f"https://api.coverr.co/videos/{vid_id}",
+                                       headers={"Authorization": f"Bearer {COVERR_KEY}"},
+                                       timeout=10).json()
+                    src = (det.get("urls",{}).get("mp4") or
+                           det.get("urls",{}).get("mp4_preview",""))
+                except Exception:
+                    src = ""
                 if src:
                     results.append((src, vid, dur, thumb))
                 if len(results) >= top_n: return results
