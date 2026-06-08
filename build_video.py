@@ -20,8 +20,8 @@ import numpy as np
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 FFMPEG   = "/usr/local/lib/python3.11/dist-packages/imageio_ffmpeg/binaries/ffmpeg-linux-x86_64-v7.0.2"
-AUDIO    = sys.argv[1] if len(sys.argv) > 1 else "/root/.claude/uploads/c6774b2d-5668-54de-9a4f-188c80ca845c/bf1d7703-full_voiceover.mp3"
-OUTPUT   = sys.argv[2] if len(sys.argv) > 2 else "/home/user/Stock-Video-Collector/turbulence_video.mp4"
+AUDIO    = sys.argv[1] if len(sys.argv) > 1 else "/root/.claude/uploads/c6774b2d-5668-54de-9a4f-188c80ca845c/3fac48e1-full_voiceover.mp3"
+OUTPUT   = sys.argv[2] if len(sys.argv) > 2 else "/home/user/Stock-Video-Collector/autopilot_video.mp4"
 WORK     = "/tmp/vbuild"
 RAWDIR   = f"{WORK}/raw"
 SEGDIR   = f"{WORK}/seg"
@@ -567,12 +567,12 @@ else:
     print("Whoosh SFX generated.")
 
 # ── Scene plan ────────────────────────────────────────────────────────────────
-# Turbulence pilot thoughts video — 15 scenes
-# Total words: 550
+# Autopilot secrets video — 34 scenes
+# Total words: 1422
 TOTAL_DUR = get_dur(AUDIO)
-RATE = TOTAL_DUR / 550.0
+RATE = TOTAL_DUR / 1422.0
 
-SCENE_WORDS = [32,32,37,30,39,31,38,31,36,42,40,34,37,40,41]
+SCENE_WORDS = [44,33,36,44,44,45,36,38,42,42,43,41,40,47,48,45,47,42,36,47,39,41,35,40,41,44,40,40,44,39,46,45,42,46]
 
 scene_starts = []
 t = 0.0
@@ -581,38 +581,76 @@ for w in SCENE_WORDS:
     t += w * RATE
 scene_ends = scene_starts[1:] + [round(TOTAL_DUR, 2)]
 
-# (desc, [queries]) per scene — Turbulence pilot thoughts video
+# (desc, [queries]) per scene — Autopilot secrets video
 SCENE_META = [
-    ("passenger gripping armrest airplane turbulence fear panic",
-     ["passenger gripping armrest airplane turbulence","scared traveler seat belt airplane shaking","airplane seat belt turbulence passenger panic"]),
-    ("pilot survey cockpit calm professional flight statistics",
-     ["pilot cockpit calm professional flight","airline captain cockpit instruments focus","pilot seat cockpit calm flight control"]),
-    ("airplane cabin flight attendant passenger turbulence safety",
-     ["airplane cabin turbulence flight attendant","cabin crew passenger safety belt turbulence","flight attendant calm cabin service turbulence"]),
-    ("FAA injury report seatbelt safety airline statistics",
-     ["airplane seatbelt safety injury prevention","airline safety belt statistics report","aircraft seatbelt fastened safety turbulence"]),
-    ("brain fear response panic survival instinct psychology",
-     ["brain fear response survival instinct","human brain panic fear response close","psychological fear response turbulence brain"]),
-    ("pilot cockpit instruments cabin crew check monitor",
-     ["pilot cockpit instruments check flight","captain instrument panel cockpit monitor","flight deck instrument panel check pilot"]),
-    ("storm clouds turbulence climate change weather aerial",
-     ["storm clouds turbulence aerial weather","severe weather storm clouds airplane aerial","climate change storm turbulence aerial view"]),
-    ("pilots communicating radio weather report route flight",
-     ["pilots radio communication weather report","cockpit radio communication route weather","flight deck radio weather turbulence report"]),
-    ("clear air turbulence CAT invisible sky high altitude",
-     ["clear air turbulence invisible high altitude","airplane clear sky turbulence invisible","high altitude clear sky sudden turbulence"]),
-    ("airplane wing seat stable passenger turbulence tip",
-     ["airplane wing seat stable view","aircraft wing view from seat window","stable wing seat view airplane flight"]),
-    ("flight attendant seatbelt announcement cabin service calm",
-     ["flight attendant seatbelt announcement calm","cabin crew seatbelt announcement service","flight attendant calm seatbelt instruction"]),
-    ("aircraft engineering stress test construction safety factor",
-     ["aircraft engineering stress test construction","airplane structure safety engineering test","aircraft stress test wing bend engineering"]),
-    ("pilot captain professional calm cockpit monologue routine",
-     ["pilot captain calm professional cockpit","captain routine cockpit professional calm flight","pilot calm cockpit routine flight professional"]),
-    ("passenger calm deep breath airplane trust crew relax",
-     ["passenger calm deep breath airplane relax","traveler relax airplane seat breathe calm","calm passenger seat airplane deep breath"]),
-    ("subscribe channel aviation travel knowledge notification",
-     ["subscribe travel aviation channel notification","travel channel subscribe bell knowledge","aviation subscribe channel travel tips bell"]),
+    ("autopilot cockpit flight deck controls airplane cruising",
+     ["autopilot cockpit flight controls airplane","cockpit autopilot engaged flight deck","airplane cockpit autopilot controls cruising"]),
+    ("airline secret hidden truth passenger cabin flight",
+     ["airline secret passenger cabin flight","airplane cabin passenger seat window view","flight cabin passenger window aerial view"]),
+    ("autopilot stabilization system technology aviation engineering",
+     ["autopilot system aviation technology engineering","flight control system cockpit technology","aviation autopilot technology system close"]),
+    ("Lawrence Sperry 1914 history autopilot aviation first",
+     ["aviation history first autopilot flight","vintage aviation history airplane flight","old aircraft aviation history pilot"]),
+    ("takeoff landing turbulence dangerous flight phases pilot",
+     ["airplane takeoff runway dangerous phase","aircraft takeoff runway departure close","plane takeoff runway engine thrust"]),
+    ("airplane takeoff first three minutes danger statistics",
+     ["airplane takeoff first minutes danger","aircraft departure runway takeoff close","plane takeoff runway first minutes"]),
+    ("pilot decision V1 abort takeoff engine failure",
+     ["pilot decision takeoff abort engine failure","aircraft engine failure takeoff runway","pilot decision cockpit takeoff abort"]),
+    ("autopilot engaged cruising altitude stable flight horizon",
+     ["autopilot engaged cruise altitude stable","airplane autopilot cruising altitude flight","cockpit autopilot engaged cruise altitude"]),
+    ("pilot sleeping cockpit autopilot monitoring both asleep",
+     ["pilot cockpit monitoring flight deck","pilot fatigue cockpit autopilot flight","cockpit monitoring system pilot watch"]),
+    ("pilot fatigue tiredness FAA statistics flight safety",
+     ["pilot fatigue tiredness flight safety","tired pilot fatigue aviation statistics","pilot fatigue flight safety data"]),
+    ("autoland CAT III ILS fog automatic landing system",
+     ["airplane automatic landing fog runway","aircraft autoland ILS approach runway","fog runway automatic landing airplane"]),
+    ("airport fog low visibility manual landing approach",
+     ["airport fog low visibility landing","foggy runway approach airplane landing","low visibility airport fog approach"]),
+    ("turbulence autopilot corrections active fight weather",
+     ["airplane turbulence autopilot corrections","aircraft turbulence autopilot active clouds","turbulence airplane clouds autopilot fight"]),
+    ("clear air turbulence invisible sudden drop Qatar Airways",
+     ["clear air turbulence invisible airplane","airplane sudden drop clear air turbulence","aircraft sudden turbulence clear sky"]),
+    ("autopilot precision versus human judgment context understanding",
+     ["autopilot precision system cockpit close","flight management system cockpit precision","cockpit automation precision system display"]),
+    ("Air France 447 pitot tube icing Atlantic crash",
+     ["airplane pitot tube icing sensor","aircraft sensor failure cockpit warning","pitot tube ice aviation sensor close"]),
+    ("skill degradation pilot manual flying FAA study",
+     ["pilot manual flying skill practice","pilot manual control airplane skill","cockpit manual control pilot flying"]),
+    ("Boeing Airbus fly-by-wire automation control pilot authority",
+     ["Boeing Airbus cockpit automation control","fly-by-wire system cockpit aviation","cockpit automation Boeing Airbus system"]),
+    ("Boeing 737 MAX MCAS system nose down crash",
+     ["Boeing 737 MAX cockpit system","aircraft nose down MCAS automation","Boeing cockpit system automation failure"]),
+    ("complex system software sensors human judgment flight",
+     ["complex aviation system software sensors","flight management computer system display","aviation software sensors cockpit display"]),
+    ("single pilot cockpit remote ground control future",
+     ["single pilot cockpit remote control","future cockpit single pilot aviation","remote pilot ground control cockpit"]),
+    ("autonomous drone military aircraft no pilot future",
+     ["autonomous drone aircraft flying aerial","military aircraft autonomous drone flight","drone autonomous flight aerial view"]),
+    ("passenger survey autopilot belief misconception statistics",
+     ["passenger airplane window seat survey","traveler airplane window seat view","airplane passenger window seat flying"]),
+    ("Captain Sully Hudson River landing Airbus 1549",
+     ["Hudson River airplane emergency landing","airplane emergency water landing river","aircraft emergency landing water heroic"]),
+    ("pilot 208 seconds decision algorithm human intelligence",
+     ["pilot cockpit decision emergency seconds","cockpit emergency decision pilot quick","pilot emergency decision cockpit rapid"]),
+    ("Garmin Autoland AI cockpit button passenger emergency",
+     ["Garmin Autoland cockpit button AI","small aircraft autopilot emergency button","cockpit AI autoland emergency system"]),
+    ("AI limitations improvise unexpected aviation safety",
+     ["AI aviation limitation cockpit system","artificial intelligence aviation system limit","cockpit AI system limitation aviation"]),
+    ("airline transparency hidden truth autopilot passenger",
+     ["airline passenger cabin hidden truth","airplane cabin passenger trust airline","airline cockpit transparency passenger cabin"]),
+    ("flight safety statistics car accident comparison data",
+     ["flight safety statistics comparison chart","aviation safety statistics data chart","airplane safety vs car statistics"]),
+    ("autopilot pilot partnership machine human aviation",
+     ["autopilot pilot partnership cockpit machine","cockpit pilot machine partnership aviation","human machine partnership cockpit aviation"]),
+    ("autopilot dependency danger future aviation paradox",
+     ["autopilot dependency cockpit danger future","aviation automation dependency cockpit system","cockpit autopilot dependency future aviation"]),
+    ("passenger boarding airplane seatbelt pilot cockpit coffee",
+     ["passenger boarding airplane seatbelt buckle","airplane interior passenger buckle seat","aircraft cabin passenger seatbelt boarding"]),
+    ("five truths autopilot summary aviation facts",
+     ["cockpit aviation summary facts display","flight facts aviation summary cockpit","aviation autopilot summary cockpit facts"]),
+    ("subscribe aviation channel secrets truth knowledge",
+     ["subscribe aviation channel notification bell","travel aviation channel subscribe secrets","aviation secrets channel subscribe knowledge"]),
 ]
 
 # ── Build clip list (4-7s sub-clips per scene) ────────────────────────────────
