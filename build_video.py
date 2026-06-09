@@ -20,8 +20,8 @@ import numpy as np
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 FFMPEG   = "/usr/local/lib/python3.11/dist-packages/imageio_ffmpeg/binaries/ffmpeg-linux-x86_64-v7.0.2"
-AUDIO    = sys.argv[1] if len(sys.argv) > 1 else "/root/.claude/uploads/c6774b2d-5668-54de-9a4f-188c80ca845c/3fac48e1-full_voiceover.mp3"
-OUTPUT   = sys.argv[2] if len(sys.argv) > 2 else "/home/user/Stock-Video-Collector/autopilot_video.mp4"
+AUDIO    = sys.argv[1] if len(sys.argv) > 1 else "/root/.claude/uploads/c6774b2d-5668-54de-9a4f-188c80ca845c/1ca0929b-full_voiceover.mp3"
+OUTPUT   = sys.argv[2] if len(sys.argv) > 2 else "/home/user/Stock-Video-Collector/packing_video.mp4"
 WORK     = "/tmp/vbuild"
 RAWDIR   = f"{WORK}/raw"
 SEGDIR   = f"{WORK}/seg"
@@ -567,12 +567,12 @@ else:
     print("Whoosh SFX generated.")
 
 # ── Scene plan ────────────────────────────────────────────────────────────────
-# Autopilot secrets video — 34 scenes
-# Total words: 1422
+# Packing tricks video — 30 scenes
+# Total words: 1102
 TOTAL_DUR = get_dur(AUDIO)
-RATE = TOTAL_DUR / 1422.0
+RATE = TOTAL_DUR / 1102.0
 
-SCENE_WORDS = [44,33,36,44,44,45,36,38,42,42,43,41,40,47,48,45,47,42,36,47,39,41,35,40,41,44,40,40,44,39,46,45,42,46]
+SCENE_WORDS = [34,42,37,39,36,36,36,36,31,38,35,38,33,31,42,34,38,39,39,35,33,36,39,36,34,38,33,37,44,43]
 
 scene_starts = []
 t = 0.0
@@ -581,76 +581,68 @@ for w in SCENE_WORDS:
     t += w * RATE
 scene_ends = scene_starts[1:] + [round(TOTAL_DUR, 2)]
 
-# (desc, [queries]) per scene — Autopilot secrets video
+# (desc, [queries]) per scene — Packing tricks video
 SCENE_META = [
-    ("autopilot cockpit flight deck controls airplane cruising",
-     ["autopilot cockpit flight controls airplane","cockpit autopilot engaged flight deck","airplane cockpit autopilot controls cruising"]),
-    ("airline secret hidden truth passenger cabin flight",
-     ["airline secret passenger cabin flight","airplane cabin passenger seat window view","flight cabin passenger window aerial view"]),
-    ("autopilot stabilization system technology aviation engineering",
-     ["autopilot system aviation technology engineering","flight control system cockpit technology","aviation autopilot technology system close"]),
-    ("Lawrence Sperry 1914 history autopilot aviation first",
-     ["aviation history first autopilot flight","vintage aviation history airplane flight","old aircraft aviation history pilot"]),
-    ("takeoff landing turbulence dangerous flight phases pilot",
-     ["airplane takeoff runway dangerous phase","aircraft takeoff runway departure close","plane takeoff runway engine thrust"]),
-    ("airplane takeoff first three minutes danger statistics",
-     ["airplane takeoff first minutes danger","aircraft departure runway takeoff close","plane takeoff runway first minutes"]),
-    ("pilot decision V1 abort takeoff engine failure",
-     ["pilot decision takeoff abort engine failure","aircraft engine failure takeoff runway","pilot decision cockpit takeoff abort"]),
-    ("autopilot engaged cruising altitude stable flight horizon",
-     ["autopilot engaged cruise altitude stable","airplane autopilot cruising altitude flight","cockpit autopilot engaged cruise altitude"]),
-    ("pilot sleeping cockpit autopilot monitoring both asleep",
-     ["pilot cockpit monitoring flight deck","pilot fatigue cockpit autopilot flight","cockpit monitoring system pilot watch"]),
-    ("pilot fatigue tiredness FAA statistics flight safety",
-     ["pilot fatigue tiredness flight safety","tired pilot fatigue aviation statistics","pilot fatigue flight safety data"]),
-    ("autoland CAT III ILS fog automatic landing system",
-     ["airplane automatic landing fog runway","aircraft autoland ILS approach runway","fog runway automatic landing airplane"]),
-    ("airport fog low visibility manual landing approach",
-     ["airport fog low visibility landing","foggy runway approach airplane landing","low visibility airport fog approach"]),
-    ("turbulence autopilot corrections active fight weather",
-     ["airplane turbulence autopilot corrections","aircraft turbulence autopilot active clouds","turbulence airplane clouds autopilot fight"]),
-    ("clear air turbulence invisible sudden drop Qatar Airways",
-     ["clear air turbulence invisible airplane","airplane sudden drop clear air turbulence","aircraft sudden turbulence clear sky"]),
-    ("autopilot precision versus human judgment context understanding",
-     ["autopilot precision system cockpit close","flight management system cockpit precision","cockpit automation precision system display"]),
-    ("Air France 447 pitot tube icing Atlantic crash",
-     ["airplane pitot tube icing sensor","aircraft sensor failure cockpit warning","pitot tube ice aviation sensor close"]),
-    ("skill degradation pilot manual flying FAA study",
-     ["pilot manual flying skill practice","pilot manual control airplane skill","cockpit manual control pilot flying"]),
-    ("Boeing Airbus fly-by-wire automation control pilot authority",
-     ["Boeing Airbus cockpit automation control","fly-by-wire system cockpit aviation","cockpit automation Boeing Airbus system"]),
-    ("Boeing 737 MAX MCAS system nose down crash",
-     ["Boeing 737 MAX cockpit system","aircraft nose down MCAS automation","Boeing cockpit system automation failure"]),
-    ("complex system software sensors human judgment flight",
-     ["complex aviation system software sensors","flight management computer system display","aviation software sensors cockpit display"]),
-    ("single pilot cockpit remote ground control future",
-     ["single pilot cockpit remote control","future cockpit single pilot aviation","remote pilot ground control cockpit"]),
-    ("autonomous drone military aircraft no pilot future",
-     ["autonomous drone aircraft flying aerial","military aircraft autonomous drone flight","drone autonomous flight aerial view"]),
-    ("passenger survey autopilot belief misconception statistics",
-     ["passenger airplane window seat survey","traveler airplane window seat view","airplane passenger window seat flying"]),
-    ("Captain Sully Hudson River landing Airbus 1549",
-     ["Hudson River airplane emergency landing","airplane emergency water landing river","aircraft emergency landing water heroic"]),
-    ("pilot 208 seconds decision algorithm human intelligence",
-     ["pilot cockpit decision emergency seconds","cockpit emergency decision pilot quick","pilot emergency decision cockpit rapid"]),
-    ("Garmin Autoland AI cockpit button passenger emergency",
-     ["Garmin Autoland cockpit button AI","small aircraft autopilot emergency button","cockpit AI autoland emergency system"]),
-    ("AI limitations improvise unexpected aviation safety",
-     ["AI aviation limitation cockpit system","artificial intelligence aviation system limit","cockpit AI system limitation aviation"]),
-    ("airline transparency hidden truth autopilot passenger",
-     ["airline passenger cabin hidden truth","airplane cabin passenger trust airline","airline cockpit transparency passenger cabin"]),
-    ("flight safety statistics car accident comparison data",
-     ["flight safety statistics comparison chart","aviation safety statistics data chart","airplane safety vs car statistics"]),
-    ("autopilot pilot partnership machine human aviation",
-     ["autopilot pilot partnership cockpit machine","cockpit pilot machine partnership aviation","human machine partnership cockpit aviation"]),
-    ("autopilot dependency danger future aviation paradox",
-     ["autopilot dependency cockpit danger future","aviation automation dependency cockpit system","cockpit autopilot dependency future aviation"]),
-    ("passenger boarding airplane seatbelt pilot cockpit coffee",
-     ["passenger boarding airplane seatbelt buckle","airplane interior passenger buckle seat","aircraft cabin passenger seatbelt boarding"]),
-    ("five truths autopilot summary aviation facts",
-     ["cockpit aviation summary facts display","flight facts aviation summary cockpit","aviation autopilot summary cockpit facts"]),
-    ("subscribe aviation channel secrets truth knowledge",
-     ["subscribe aviation channel notification bell","travel aviation channel subscribe secrets","aviation secrets channel subscribe knowledge"]),
+    ("traveler paying excess baggage fee airport counter frustrated",
+     ["traveler paying excess baggage airport fee","passenger overweight luggage airport fine","traveler frustrated excess baggage fee airport"]),
+    ("airline extra fees baggage revenue statistics chart money",
+     ["airline baggage fee revenue statistics money","excess baggage charge airline fee money","airline revenue baggage surcharge statistics"]),
+    ("packing tips travel tricks professional traveler suitcase",
+     ["professional traveler packing tips suitcase","travel packing tricks suitcase open","smart packing tips travel luggage"]),
+    ("weighing empty suitcase scale luggage weight check",
+     ["weighing empty suitcase luggage scale","suitcase weight check scale measurement","empty luggage scale weigh travel"]),
+    ("heavy suitcase luggage overweight scale airport",
+     ["heavy suitcase overweight scale airport","luggage overweight measurement suitcase scale","overweight baggage suitcase airport check"]),
+    ("rolling clothes suitcase packing space saving technique",
+     ["rolling clothes suitcase packing technique","roll clothes luggage space saving","folding rolling clothes suitcase pack"]),
+    ("military ranger roll clothes compact packing technique",
+     ["military ranger roll packing technique","compact clothes rolling packing uniform","efficient clothes rolling packing army"]),
+    ("packing cubes organizer suitcase compartments travel",
+     ["packing cubes organizer suitcase travel","luggage organizer cubes compartments packing","packing cubes suitcase organization travel"]),
+    ("compression packing cube squeeze luggage space",
+     ["compression packing cube squeeze luggage","compress clothes packing cube travel","vacuum compression bag suitcase packing"]),
+    ("packing shoes suitcase bottom luggage travel",
+     ["packing shoes suitcase bottom travel","shoes in luggage suitcase packing","travel shoes packed suitcase bottom"]),
+    ("shoes socks accessories packed inside hollow space luggage",
+     ["socks inside shoes luggage space saving","accessories packed shoes hollow suitcase","shoes with socks inside packing trick"]),
+    ("capsule wardrobe minimal clothing travel outfit combination",
+     ["capsule wardrobe minimal clothes travel","outfit combinations minimal wardrobe travel","capsule travel wardrobe few clothes combinations"]),
+    ("color palette clothing wardrobe matching travel",
+     ["color palette matching clothing wardrobe","neutral color wardrobe clothes matching","minimalist color palette travel clothes"]),
+    ("solid shampoo bar travel toiletries soap tablet",
+     ["solid shampoo bar travel toiletries","travel solid soap shampoo bar tablet","toiletry solid bar shampoo travel bag"]),
+    ("liquid bottle sealed latex glove rubber band leak prevention",
+     ["bottle sealed rubber band leak prevention travel","liquid toiletry leak prevention travel bag","sealed bottle liquid shampoo travel trick"]),
+    ("hand luggage carry on bag optimized flight boarding",
+     ["hand luggage carry on bag optimized flight","carry on bag boarding gate hand luggage","optimized hand luggage boarding travel"]),
+    ("backpack carry on dimension airline size check travel",
+     ["backpack carry on airline dimension size check","airline size check carry on baggage","backpack dimensions airline hand luggage"]),
+    ("saving money travel flying no checked baggage fee",
+     ["saving money travel no checked baggage","flying without checked bag money saving","budget travel no baggage fee flight"]),
+    ("tech pouch electronics cables organizer travel",
+     ["tech pouch electronics cables organizer travel","technology bag cables organizer travel","electronics pouch cables travel organized"]),
+    ("powerbank lithium battery carry on hand luggage rules",
+     ["powerbank lithium battery carry on hand luggage","lithium battery airline rules carry on","powerbank travel rules airline battery"]),
+    ("travel digital packing list app phone organized",
+     ["digital packing list travel app phone","travel packing list digital app organized","packing list app digital travel phone"]),
+    ("packing list missing item forget travel problem",
+     ["packing list missing item forget travel","forget item travel packing list problem","lost forgotten item travel packing"]),
+    ("TSA lock luggage security customs travel approved",
+     ["TSA approved lock luggage security travel","TSA lock suitcase customs security","security approved luggage lock TSA travel"]),
+    ("AirTag GPS tracker luggage lost bag tracking",
+     ["AirTag GPS tracker lost luggage tracking","GPS tracker suitcase lost bag travel","luggage tracker AirTag travel lost bag"]),
+    ("summary list packing tricks travel tips",
+     ["packing tricks summary list travel tips","travel packing tips list summary","travel packing checklist tips summary"]),
+    ("smart traveler efficient packing suitcase travel",
+     ["smart traveler efficient packing suitcase","efficient traveler suitcase packed travel","experienced traveler packing suitcase smart"]),
+    ("stress free airport departure calm traveler",
+     ["stress free airport departure calm traveler","calm traveler airport departure stress free","relaxed traveler airport boarding gate"]),
+    ("airplane overhead bin carry on luggage boarding",
+     ["airplane overhead bin carry on luggage","boarding plane overhead luggage compartment","carry on overhead bin airplane boarding"]),
+    ("traveler saving money budget travel success happy",
+     ["traveler saving money budget travel success","happy traveler saving money budget flight","budget traveler success saving money travel"]),
+    ("subscribe channel travel tips like notification",
+     ["travel tips channel subscribe notification","travel channel like subscribe travel tips","travel knowledge subscribe channel bell notification"]),
 ]
 
 # ── Build clip list (4-7s sub-clips per scene) ────────────────────────────────
