@@ -124,7 +124,9 @@ def clip_score_url(url, text):
     return clip_score(p, text) if os.path.exists(p) else 0.0
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-used_ids = set()
+USED_IDS_FILE = os.path.join(os.path.dirname(__file__), "used_clip_ids.json")
+used_ids = set(json.load(open(USED_IDS_FILE)) if os.path.exists(USED_IDS_FILE) else [])
+print(f"Loaded {len(used_ids)} previously used clip IDs.")
 
 def get_dur(p):
     r = subprocess.run([FFMPEG,"-i",p], capture_output=True, text=True)
@@ -729,6 +731,7 @@ for i, clip in enumerate(CLIPS):
         continue
 
     used_ids.add(vid)
+    with open(USED_IDS_FILE, "w") as _f: json.dump(list(used_ids), _f)
     raw_p = f"{RAWDIR}/r{i:04d}_{vid}.mp4"
 
     if not download(url, raw_p):
@@ -744,7 +747,8 @@ for i, clip in enumerate(CLIPS):
     # Ken Burns disabled — zoompan freezes video clips on first frame
     kb = False
 
-    print(f"[{i:3d}] scene={clip['scene']:2d}  {clip['start']:.1f}-{clip['end']:.1f}s  "
+    src_tag = vid.split("_")[0] if "_" in vid else "?"
+    print(f"[{i:3d}] [{src_tag}] scene={clip['scene']:2d}  {clip['start']:.1f}-{clip['end']:.1f}s  "
           f"src={actual_dur:.0f}s  off={best_t:.1f}s  CLIP={best_s:.3f}  "
           f"KB={'Y' if kb else 'N'}  {queries[0][:35]}")
 
