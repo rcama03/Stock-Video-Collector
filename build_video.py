@@ -12,7 +12,7 @@ Features (from pipeline_config.py):
   - B-roll cutaways at pauses
 """
 
-import os, sys, re, time, json, subprocess, requests, torch, textwrap
+import os, sys, re, time, json, random, subprocess, requests, torch, textwrap
 import anthropic
 from PIL import Image, ImageDraw, ImageFont
 from transformers import CLIPModel, CLIPProcessor
