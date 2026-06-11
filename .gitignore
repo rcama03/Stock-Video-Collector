@@ -14,3 +14,4 @@ CLAUDE.md
 api_keys.env
 *.mp4
 !cta_preview_v2.mp4
+used_clip_ids.json
