@@ -137,14 +137,21 @@ def download(url, path, max_mb=80):
     if os.path.exists(path) and os.path.getsize(path) > 50000:
         return True
     try:
-        r = requests.get(url, stream=True, timeout=90,
-                         headers={"User-Agent":"Mozilla/5.0"})
-        r.raise_for_status()
-        tot = 0
-        with open(path,"wb") as f:
-            for chunk in r.iter_content(65536):
-                f.write(chunk); tot += len(chunk)
-                if tot > max_mb*1024*1024: break
+        import signal
+        def _timeout(sig, frame): raise TimeoutError("download stalled")
+        signal.signal(signal.SIGALRM, _timeout)
+        signal.alarm(60)
+        try:
+            r = requests.get(url, stream=True, timeout=30,
+                             headers={"User-Agent":"Mozilla/5.0"})
+            r.raise_for_status()
+            tot = 0
+            with open(path,"wb") as f:
+                for chunk in r.iter_content(65536):
+                    f.write(chunk); tot += len(chunk)
+                    if tot > max_mb*1024*1024: break
+        finally:
+            signal.alarm(0)
         return tot > 10000
     except Exception as e:
         print(f"  DL error: {e}"); return False
