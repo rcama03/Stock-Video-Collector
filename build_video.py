@@ -20,8 +20,8 @@ import numpy as np
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 FFMPEG   = "/usr/local/lib/python3.11/dist-packages/imageio_ffmpeg/binaries/ffmpeg-linux-x86_64-v7.0.2"
-AUDIO    = sys.argv[1] if len(sys.argv) > 1 else "/root/.claude/uploads/c6774b2d-5668-54de-9a4f-188c80ca845c/1ca0929b-full_voiceover.mp3"
-OUTPUT   = sys.argv[2] if len(sys.argv) > 2 else "/home/user/Stock-Video-Collector/packing_video.mp4"
+AUDIO    = sys.argv[1] if len(sys.argv) > 1 else "/root/.claude/uploads/c6774b2d-5668-54de-9a4f-188c80ca845c/72d6bf0e-full_voiceover.mp3"
+OUTPUT   = sys.argv[2] if len(sys.argv) > 2 else "/home/user/Stock-Video-Collector/gepaeck_finder_video.mp4"
 WORK     = "/tmp/vbuild"
 RAWDIR   = f"{WORK}/raw"
 SEGDIR   = f"{WORK}/seg"
@@ -569,12 +569,12 @@ else:
     print("Whoosh SFX generated.")
 
 # ── Scene plan ────────────────────────────────────────────────────────────────
-# Packing tricks video — 30 scenes
-# Total words: 1102
+# Luggage finder tricks video — 31 scenes
+# Total words: 1395
 TOTAL_DUR = get_dur(AUDIO)
-RATE = TOTAL_DUR / 1102.0
+RATE = TOTAL_DUR / 1395.0
 
-SCENE_WORDS = [34,42,37,39,36,36,36,36,31,38,35,38,33,31,42,34,38,39,39,35,33,36,39,36,34,38,33,37,44,43]
+SCENE_WORDS = [39,39,40,38,44,44,38,46,39,46,52,52,44,44,46,41,46,45,44,44,46,47,50,44,50,46,54,45,45,50,47]
 
 scene_starts = []
 t = 0.0
@@ -583,68 +583,70 @@ for w in SCENE_WORDS:
     t += w * RATE
 scene_ends = scene_starts[1:] + [round(TOTAL_DUR, 2)]
 
-# (desc, [queries]) per scene — Packing tricks video
+# (desc, [queries]) per scene — Luggage finder tricks video
 SCENE_META = [
-    ("traveler paying excess baggage fee airport counter frustrated",
-     ["traveler paying excess baggage airport fee","passenger overweight luggage airport fine","traveler frustrated excess baggage fee airport"]),
-    ("airline extra fees baggage revenue statistics chart money",
-     ["airline baggage fee revenue statistics money","excess baggage charge airline fee money","airline revenue baggage surcharge statistics"]),
-    ("packing tips travel tricks professional traveler suitcase",
-     ["professional traveler packing tips suitcase","travel packing tricks suitcase open","smart packing tips travel luggage"]),
-    ("weighing empty suitcase scale luggage weight check",
-     ["weighing empty suitcase luggage scale","suitcase weight check scale measurement","empty luggage scale weigh travel"]),
-    ("heavy suitcase luggage overweight scale airport",
-     ["heavy suitcase overweight scale airport","luggage overweight measurement suitcase scale","overweight baggage suitcase airport check"]),
-    ("rolling clothes suitcase packing space saving technique",
-     ["rolling clothes suitcase packing technique","roll clothes luggage space saving","folding rolling clothes suitcase pack"]),
-    ("military ranger roll clothes compact packing technique",
-     ["military ranger roll packing technique","compact clothes rolling packing uniform","efficient clothes rolling packing army"]),
-    ("packing cubes organizer suitcase compartments travel",
-     ["packing cubes organizer suitcase travel","luggage organizer cubes compartments packing","packing cubes suitcase organization travel"]),
-    ("compression packing cube squeeze luggage space",
-     ["compression packing cube squeeze luggage","compress clothes packing cube travel","vacuum compression bag suitcase packing"]),
-    ("packing shoes suitcase bottom luggage travel",
-     ["packing shoes suitcase bottom travel","shoes in luggage suitcase packing","travel shoes packed suitcase bottom"]),
-    ("shoes socks accessories packed inside hollow space luggage",
-     ["socks inside shoes luggage space saving","accessories packed shoes hollow suitcase","shoes with socks inside packing trick"]),
-    ("capsule wardrobe minimal clothing travel outfit combination",
-     ["capsule wardrobe minimal clothes travel","outfit combinations minimal wardrobe travel","capsule travel wardrobe few clothes combinations"]),
-    ("color palette clothing wardrobe matching travel",
-     ["color palette matching clothing wardrobe","neutral color wardrobe clothes matching","minimalist color palette travel clothes"]),
-    ("solid shampoo bar travel toiletries soap tablet",
-     ["solid shampoo bar travel toiletries","travel solid soap shampoo bar tablet","toiletry solid bar shampoo travel bag"]),
-    ("liquid bottle sealed latex glove rubber band leak prevention",
-     ["bottle sealed rubber band leak prevention travel","liquid toiletry leak prevention travel bag","sealed bottle liquid shampoo travel trick"]),
-    ("hand luggage carry on bag optimized flight boarding",
-     ["hand luggage carry on bag optimized flight","carry on bag boarding gate hand luggage","optimized hand luggage boarding travel"]),
-    ("backpack carry on dimension airline size check travel",
-     ["backpack carry on airline dimension size check","airline size check carry on baggage","backpack dimensions airline hand luggage"]),
-    ("saving money travel flying no checked baggage fee",
-     ["saving money travel no checked baggage","flying without checked bag money saving","budget travel no baggage fee flight"]),
-    ("tech pouch electronics cables organizer travel",
-     ["tech pouch electronics cables organizer travel","technology bag cables organizer travel","electronics pouch cables travel organized"]),
-    ("powerbank lithium battery carry on hand luggage rules",
-     ["powerbank lithium battery carry on hand luggage","lithium battery airline rules carry on","powerbank travel rules airline battery"]),
-    ("travel digital packing list app phone organized",
-     ["digital packing list travel app phone","travel packing list digital app organized","packing list app digital travel phone"]),
-    ("packing list missing item forget travel problem",
-     ["packing list missing item forget travel","forget item travel packing list problem","lost forgotten item travel packing"]),
-    ("TSA lock luggage security customs travel approved",
-     ["TSA approved lock luggage security travel","TSA lock suitcase customs security","security approved luggage lock TSA travel"]),
-    ("AirTag GPS tracker luggage lost bag tracking",
-     ["AirTag GPS tracker lost luggage tracking","GPS tracker suitcase lost bag travel","luggage tracker AirTag travel lost bag"]),
-    ("summary list packing tricks travel tips",
-     ["packing tricks summary list travel tips","travel packing tips list summary","travel packing checklist tips summary"]),
-    ("smart traveler efficient packing suitcase travel",
-     ["smart traveler efficient packing suitcase","efficient traveler suitcase packed travel","experienced traveler packing suitcase smart"]),
-    ("stress free airport departure calm traveler",
-     ["stress free airport departure calm traveler","calm traveler airport departure stress free","relaxed traveler airport boarding gate"]),
-    ("airplane overhead bin carry on luggage boarding",
-     ["airplane overhead bin carry on luggage","boarding plane overhead luggage compartment","carry on overhead bin airplane boarding"]),
-    ("traveler saving money budget travel success happy",
-     ["traveler saving money budget travel success","happy traveler saving money budget flight","budget traveler success saving money travel"]),
-    ("subscribe channel travel tips like notification",
-     ["travel tips channel subscribe notification","travel channel like subscribe travel tips","travel knowledge subscribe channel bell notification"]),
+    ("lost luggage baggage carousel airport missing suitcase",
+     ["lost luggage baggage carousel airport","missing suitcase baggage belt airport","lost bag baggage claim airport carousel"]),
+    ("airline employee luggage insider tips airport baggage",
+     ["airline employee luggage tips airport","baggage handler airport insider knowledge","airline staff luggage handling airport"]),
+    ("luggage tag label name address contact suitcase",
+     ["luggage tag label name address suitcase","baggage tag contact details travel","suitcase label name phone number travel"]),
+    ("luggage tag email contact details airport lost found",
+     ["luggage tag email contact details airport","lost found baggage email contact","baggage tag contact email travel"]),
+    ("note paper inside suitcase contact information luggage",
+     ["note paper inside suitcase contact info","paper contact inside luggage travel","inside suitcase paper contact details"]),
+    ("colorful luggage band strap distinctive suitcase travel",
+     ["colorful luggage band strap distinctive","bright luggage strap belt suitcase travel","distinctive colorful suitcase band travel"]),
+    ("black suitcase identical luggage carousel confusion airport",
+     ["black suitcase identical luggage airport","identical black bags carousel airport confusion","same black luggage airport baggage claim"]),
+    ("photograph suitcase contents before travel documentation",
+     ["photograph suitcase before travel documentation","photo luggage contents documentation travel","suitcase photo evidence before check-in"]),
+    ("check-in counter photo timestamp luggage damage proof",
+     ["check-in counter photo timestamp luggage","luggage damage proof photo airport check-in","timestamp photo suitcase check-in proof"]),
+    ("AirTag GPS tracker hidden suitcase luggage travel",
+     ["AirTag GPS tracker hidden suitcase","GPS tracker luggage hidden travel","AirTag tracker suitcase hidden travel"]),
+    ("AirTag hidden inside suitcase lining sewn tracker",
+     ["AirTag hidden inside suitcase lining","tracker sewn inside luggage lining hidden","GPS tracker hidden luggage inner lining"]),
+    ("airline staff counter GPS tracker phone live location",
+     ["airline staff counter GPS tracker phone","live location luggage tracker airline staff","GPS phone location luggage airline counter"]),
+    ("AirTag activate setup share location trusted person",
+     ["AirTag activate setup share location","GPS tracker setup share location travel","tracker activate share location person travel"]),
+    ("AirTag tracker travel benefit save money luggage",
+     ["AirTag tracker travel benefit save money","GPS luggage tracker worth investment travel","tracker luggage benefit travel 30 euro"]),
+    ("early check-in airport baggage system registration",
+     ["early check-in airport baggage system","early baggage drop airport check-in","airport early check-in luggage system"]),
+    ("last minute luggage check-in rushed airport staff error",
+     ["last minute luggage check-in airport rushed","late baggage drop airport staff error","last minute check-in luggage mistake airport"]),
+    ("old luggage label barcode removal suitcase",
+     ["old luggage label barcode removal suitcase","remove old barcode label suitcase travel","old sticker barcode luggage remove travel"]),
+    ("automatic baggage sorting system airport barcode scanner",
+     ["automatic baggage sorting system airport","airport barcode scanner luggage sorting","automated baggage handling system airport"]),
+    ("baggage sorting airport summary travel tips tricks",
+     ["baggage sorting airport travel tips summary","luggage tips airport baggage summary","travel luggage tips baggage airport"]),
+    ("direct flight luggage transfer risk airport connection",
+     ["direct flight luggage transfer risk airport","connecting flight luggage loss risk","baggage transfer risk connecting flight airport"]),
+    ("single airline booking luggage protection rights travel",
+     ["single airline booking luggage protection","one airline booking luggage rights travel","airline single booking luggage protection"]),
+    ("PIR property irregularity report lost baggage airport form",
+     ["PIR property irregularity report airport","lost baggage form airport PIR report","baggage irregularity report airport fill"]),
+    ("Montreal convention passenger rights lost luggage compensation",
+     ["Montreal convention passenger rights luggage","lost luggage compensation passenger rights","airline compensation lost luggage rights"]),
+    ("luggage tricks summary checklist travel airport",
+     ["luggage tricks summary checklist travel","baggage tips summary travel airport","luggage checklist tips summary travel"]),
+    ("unclaimed baggage center store lost luggage items",
+     ["unclaimed baggage center store lost items","lost luggage store unclaimed items","unclaimed baggage center Alabama store"]),
+    ("SITA baggage report statistics lost delayed luggage",
+     ["SITA baggage report statistics lost delayed","airline baggage statistics delayed lost report","baggage report statistics travel industry"]),
+    ("RFID chip luggage tag technology airline tracking",
+     ["RFID chip luggage tag technology airline","RFID baggage tracking technology airline","luggage RFID chip tracking technology"]),
+    ("airport baggage handler worker label suitcase belt",
+     ["airport baggage handler worker label suitcase","baggage worker airport label luggage belt","airport luggage handler worker suitcase"]),
+    ("Frankfurt airport baggage sorting high volume processing",
+     ["Frankfurt airport baggage sorting high volume","large airport baggage processing high volume","airport baggage sorting system volume scale"]),
+    ("confident traveler airport luggage knowledge prepared",
+     ["confident traveler airport luggage prepared","prepared traveler airport baggage knowledge","smart traveler airport luggage tips"]),
+    ("subscribe travel channel tips share video notification",
+     ["subscribe travel channel tips share video","travel tips channel subscribe notification bell","share travel video subscribe channel tips"]),
 ]
 
 # ── Build clip list (4-7s sub-clips per scene) ────────────────────────────────
