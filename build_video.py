@@ -934,7 +934,7 @@ if size > 90:
     compressed = OUTPUT.replace(".mp4","_gh.mp4")
     print(f"\nCompressing for GitHub ({size:.0f}MB > 90MB)…")
     subprocess.run([FFMPEG,"-y","-i",OUTPUT,
-                    "-c:v","libx264","-crf","24","-preset","slow",
+                    "-c:v","libx264","-crf","28","-preset","medium",
                     "-c:a","aac","-b:a","128k", compressed], capture_output=True)
     c_size = os.path.getsize(compressed)/1024/1024
     print(f"   GitHub copy: {c_size:.1f} MB → {compressed}")
