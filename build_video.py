@@ -720,12 +720,29 @@ for i, clip in enumerate(CLIPS):
     # ── Step 1: gather candidates from all sources ─────────────────────────
     min_src = dur + 2
     candidates = []
-    candidates += search_pexels(queries, min_src, top_n=8)
-    candidates += search_pixabay(queries, min_src, top_n=6)
-    candidates += search_coverr(queries, min_src, top_n=6)
-    candidates += search_mixkit(queries[:1], min_src, top_n=6)
+    _sources = [
+        lambda: search_pexels(queries, min_src, top_n=8),
+        lambda: search_pixabay(queries, min_src, top_n=6),
+        lambda: search_coverr(queries, min_src, top_n=6),
+        lambda: search_mixkit(queries[:1], min_src, top_n=6),
+    ]
+    random.shuffle(_sources)
+    for _src in _sources:
+        candidates += _src()
 
     url, vid, src_dur = best_candidate(candidates, desc)
+
+    # fallback: generic airport/travel clip
+    if not url:
+        _fallback_q = ["airport terminal travel","airplane flight travel","airport passengers travel"]
+        _fb = []
+        for _src in [lambda: search_pexels(_fallback_q, min_src, top_n=4),
+                     lambda: search_pixabay(_fallback_q, min_src, top_n=4)]:
+            _fb += _src()
+            if _fb: break
+        if _fb:
+            url, vid, src_dur = best_candidate(_fb, "airport travel")
+            print(f"  → using generic airport fallback")
 
     if not url:
         # fallback: black frame
