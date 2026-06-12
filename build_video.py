@@ -124,9 +124,7 @@ def clip_score_url(url, text):
     return clip_score(p, text) if os.path.exists(p) else 0.0
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-USED_IDS_FILE = os.path.join(os.path.dirname(__file__), "used_clip_ids.json")
-used_ids = set(json.load(open(USED_IDS_FILE)) if os.path.exists(USED_IDS_FILE) else [])
-print(f"Loaded {len(used_ids)} previously used clip IDs.")
+used_ids = set()
 
 def get_dur(p):
     r = subprocess.run([FFMPEG,"-i",p], capture_output=True, text=True)
@@ -757,7 +755,6 @@ for i, clip in enumerate(CLIPS):
         continue
 
     used_ids.add(vid)
-    with open(USED_IDS_FILE, "w") as _f: json.dump(list(used_ids), _f)
     raw_p = f"{RAWDIR}/r{i:04d}_{vid}.mp4"
 
     if not download(url, raw_p):
