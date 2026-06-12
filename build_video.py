@@ -20,8 +20,8 @@ import numpy as np
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 FFMPEG   = "/usr/local/lib/python3.11/dist-packages/imageio_ffmpeg/binaries/ffmpeg-linux-x86_64-v7.0.2"
-AUDIO    = sys.argv[1] if len(sys.argv) > 1 else "/root/.claude/uploads/c6774b2d-5668-54de-9a4f-188c80ca845c/72d6bf0e-full_voiceover.mp3"
-OUTPUT   = sys.argv[2] if len(sys.argv) > 2 else "/home/user/Stock-Video-Collector/gepaeck_finder_video.mp4"
+AUDIO    = sys.argv[1] if len(sys.argv) > 1 else "/root/.claude/uploads/c6774b2d-5668-54de-9a4f-188c80ca845c/2665df6a-full_voiceover.mp3"
+OUTPUT   = sys.argv[2] if len(sys.argv) > 2 else "/home/user/Stock-Video-Collector/alkohol_video.mp4"
 WORK     = "/tmp/vbuild"
 RAWDIR   = f"{WORK}/raw"
 SEGDIR   = f"{WORK}/seg"
@@ -574,12 +574,12 @@ else:
     print("Whoosh SFX generated.")
 
 # ── Scene plan ────────────────────────────────────────────────────────────────
-# Luggage finder tricks video — 31 scenes
-# Total words: 1395
+# Alcohol myths on plane video — 30 scenes
+# Total words: 1144
 TOTAL_DUR = get_dur(AUDIO)
-RATE = TOTAL_DUR / 1395.0
+RATE = TOTAL_DUR / 1144.0
 
-SCENE_WORDS = [39,39,40,38,44,44,38,46,39,46,52,52,44,44,46,41,46,45,44,44,46,47,50,44,50,46,54,45,45,50,47]
+SCENE_WORDS = [37,35,31,32,40,38,38,37,33,34,35,35,34,34,40,41,46,41,44,42,37,35,38,46,41,40,39,39,37,45]
 
 scene_starts = []
 t = 0.0
@@ -588,70 +588,68 @@ for w in SCENE_WORDS:
     t += w * RATE
 scene_ends = scene_starts[1:] + [round(TOTAL_DUR, 2)]
 
-# (desc, [queries]) per scene — Luggage finder tricks video
+# (desc, [queries]) per scene — Alcohol myths on plane video
 SCENE_META = [
-    ("lost luggage baggage carousel airport missing suitcase",
-     ["lost luggage baggage carousel airport","missing suitcase baggage belt airport","lost bag baggage claim airport carousel"]),
-    ("airline employee luggage insider tips airport baggage",
-     ["airline employee luggage tips airport","baggage handler airport insider knowledge","airline staff luggage handling airport"]),
-    ("luggage tag label name address contact suitcase",
-     ["luggage tag label name address suitcase","baggage tag contact details travel","suitcase label name phone number travel"]),
-    ("luggage tag email contact details airport lost found",
-     ["luggage tag email contact details airport","lost found baggage email contact","baggage tag contact email travel"]),
-    ("note paper inside suitcase contact information luggage",
-     ["note paper inside suitcase contact info","paper contact inside luggage travel","inside suitcase paper contact details"]),
-    ("colorful luggage band strap distinctive suitcase travel",
-     ["colorful luggage band strap distinctive","bright luggage strap belt suitcase travel","distinctive colorful suitcase band travel"]),
-    ("black suitcase identical luggage carousel confusion airport",
-     ["black suitcase identical luggage airport","identical black bags carousel airport confusion","same black luggage airport baggage claim"]),
-    ("photograph suitcase contents before travel documentation",
-     ["photograph suitcase before travel documentation","photo luggage contents documentation travel","suitcase photo evidence before check-in"]),
-    ("check-in counter photo timestamp luggage damage proof",
-     ["check-in counter photo timestamp luggage","luggage damage proof photo airport check-in","timestamp photo suitcase check-in proof"]),
-    ("AirTag GPS tracker hidden suitcase luggage travel",
-     ["AirTag GPS tracker hidden suitcase","GPS tracker luggage hidden travel","AirTag tracker suitcase hidden travel"]),
-    ("AirTag hidden inside suitcase lining sewn tracker",
-     ["AirTag hidden inside suitcase lining","tracker sewn inside luggage lining hidden","GPS tracker hidden luggage inner lining"]),
-    ("airline staff counter GPS tracker phone live location",
-     ["airline staff counter GPS tracker phone","live location luggage tracker airline staff","GPS phone location luggage airline counter"]),
-    ("AirTag activate setup share location trusted person",
-     ["AirTag activate setup share location","GPS tracker setup share location travel","tracker activate share location person travel"]),
-    ("AirTag tracker travel benefit save money luggage",
-     ["AirTag tracker travel benefit save money","GPS luggage tracker worth investment travel","tracker luggage benefit travel 30 euro"]),
-    ("early check-in airport baggage system registration",
-     ["early check-in airport baggage system","early baggage drop airport check-in","airport early check-in luggage system"]),
-    ("last minute luggage check-in rushed airport staff error",
-     ["last minute luggage check-in airport rushed","late baggage drop airport staff error","last minute check-in luggage mistake airport"]),
-    ("old luggage label barcode removal suitcase",
-     ["old luggage label barcode removal suitcase","remove old barcode label suitcase travel","old sticker barcode luggage remove travel"]),
-    ("automatic baggage sorting system airport barcode scanner",
-     ["automatic baggage sorting system airport","airport barcode scanner luggage sorting","automated baggage handling system airport"]),
-    ("baggage sorting airport summary travel tips tricks",
-     ["baggage sorting airport travel tips summary","luggage tips airport baggage summary","travel luggage tips baggage airport"]),
-    ("direct flight luggage transfer risk airport connection",
-     ["direct flight luggage transfer risk airport","connecting flight luggage loss risk","baggage transfer risk connecting flight airport"]),
-    ("single airline booking luggage protection rights travel",
-     ["single airline booking luggage protection","one airline booking luggage rights travel","airline single booking luggage protection"]),
-    ("PIR property irregularity report lost baggage airport form",
-     ["PIR property irregularity report airport","lost baggage form airport PIR report","baggage irregularity report airport fill"]),
-    ("Montreal convention passenger rights lost luggage compensation",
-     ["Montreal convention passenger rights luggage","lost luggage compensation passenger rights","airline compensation lost luggage rights"]),
-    ("luggage tricks summary checklist travel airport",
-     ["luggage tricks summary checklist travel","baggage tips summary travel airport","luggage checklist tips summary travel"]),
-    ("unclaimed baggage center store lost luggage items",
-     ["unclaimed baggage center store lost items","lost luggage store unclaimed items","unclaimed baggage center Alabama store"]),
-    ("SITA baggage report statistics lost delayed luggage",
-     ["SITA baggage report statistics lost delayed","airline baggage statistics delayed lost report","baggage report statistics travel industry"]),
-    ("RFID chip luggage tag technology airline tracking",
-     ["RFID chip luggage tag technology airline","RFID baggage tracking technology airline","luggage RFID chip tracking technology"]),
-    ("airport baggage handler worker label suitcase belt",
-     ["airport baggage handler worker label suitcase","baggage worker airport label luggage belt","airport luggage handler worker suitcase"]),
-    ("Frankfurt airport baggage sorting high volume processing",
-     ["Frankfurt airport baggage sorting high volume","large airport baggage processing high volume","airport baggage sorting system volume scale"]),
-    ("confident traveler airport luggage knowledge prepared",
-     ["confident traveler airport luggage prepared","prepared traveler airport baggage knowledge","smart traveler airport luggage tips"]),
-    ("subscribe travel channel tips share video notification",
-     ["subscribe travel channel tips share video","travel tips channel subscribe notification bell","share travel video subscribe channel tips"]),
+    ("passenger drinking alcohol airplane cabin flight",
+     ["passenger drinking alcohol airplane cabin","drinking wine beer airplane flight","alcohol drink airplane passenger cabin"]),
+    ("airplane cabin pressure altitude flight stress body",
+     ["airplane cabin pressure altitude flight","low oxygen cabin pressure airplane flight","aircraft cabin altitude pressure body"]),
+    ("alcohol myths facts airplane travel lies",
+     ["alcohol myths facts airplane travel","alcohol drinking plane myths debunked","alcohol flight myths facts truth"]),
+    ("sleeping airplane sleep quality rest flight",
+     ["sleeping airplane sleep quality rest","passenger sleeping airplane seat flight","sleep airplane cabin night flight"]),
+    ("sleep study research quality alcohol effect",
+     ["sleep study research alcohol effect quality","sleep quality study alcohol research","sleep deprivation study alcohol effect"]),
+    ("airplane altitude flight higher effect body",
+     ["airplane altitude flight body effect","high altitude airplane flight body","aircraft cruising altitude flight effect"]),
+    ("airplane cabin air pressure oxygen blood",
+     ["airplane cabin air pressure oxygen blood","cabin pressure oxygen saturation blood","aircraft cabin pressure oxygen level"]),
+    ("wine tasting airplane taste different flight",
+     ["wine tasting airplane taste different","wine taste airplane cabin flight","drinking wine airplane different taste"]),
+    ("dry cabin air humidity airplane smell taste",
+     ["dry cabin air humidity airplane","low humidity airplane cabin air","aircraft cabin dry air humidity"]),
+    ("drunk driving car after flight landing airport",
+     ["drunk driving car after flight airport","driving airport after drinking flight","alcohol after flight driving impaired"]),
+    ("dehydration alcohol slower metabolism body flight",
+     ["dehydration alcohol body metabolism flight","alcohol dehydration body airplane slow","flight dehydration alcohol effect body"]),
+    ("airline drink service profit revenue alcohol",
+     ["airline drink service profit revenue alcohol","airline alcohol revenue profit service","airline beverage service alcohol profit"]),
+    ("alcohol beverage sales airline revenue billion",
+     ["alcohol beverage sales airline revenue","airline drinks revenue billion alcohol","airline alcohol sales revenue statistics"]),
+    ("calm relaxed passenger airplane drinking alcohol",
+     ["calm relaxed passenger airplane drinking","relaxed passenger airplane seat calm","drinking passenger airplane calm happy"]),
+    ("water drink hydration airplane tip health",
+     ["water drink hydration airplane tip","drinking water airplane hydration health","water hydration airplane flight health"]),
+    ("liver alcohol metabolism rate hour body",
+     ["liver alcohol metabolism rate body","alcohol breakdown liver rate hour","liver process alcohol body metabolism"]),
+    ("whiskey warm feeling cold airplane flight",
+     ["whiskey warm feeling cold airplane flight","alcohol warm body feeling cold","whiskey cold feeling airplane cabin"]),
+    ("long haul flight seat sitting temperature cabin",
+     ["long haul flight seat sitting temperature","long flight seat cabin temperature cool","long distance flight passenger seat cabin"]),
+    ("business class alcohol free drinks service premium",
+     ["business class alcohol free drinks service","business class airplane drinks premium service","premium cabin airplane alcohol service"]),
+    ("drunk passenger removed flight captain crew",
+     ["drunk passenger removed flight captain crew","disruptive drunk passenger airplane crew","intoxicated passenger flight crew remove"]),
+    ("drunk unruly passenger airplane incident statistics",
+     ["drunk unruly passenger airplane incident","alcohol incident airplane unruly passenger","airplane alcohol incident statistics flight"]),
+    ("medication sedative sleep pill mixing alcohol danger",
+     ["medication sedative sleep pill mixing alcohol","sleeping pill alcohol combination danger","sedative alcohol mix danger flight"]),
+    ("deep vein thrombosis DVT blood clot flight risk",
+     ["deep vein thrombosis blood clot flight risk","DVT blood clot airplane long flight","thrombosis risk airplane flight blood"]),
+    ("first class champagne luxury alcohol flight premium",
+     ["first class champagne luxury alcohol flight","champagne first class airplane premium","luxury first class airplane drink service"]),
+    ("frequent flyer doctor advice water airplane health",
+     ["frequent flyer doctor advice water airplane","flight doctor health advice airplane water","travel medicine advice airplane hydration"]),
+    ("jet lag alcohol worse circadian rhythm sleep",
+     ["jet lag alcohol worse circadian rhythm","alcohol jet lag circadian rhythm sleep","jet lag worsened alcohol sleep rhythm"]),
+    ("alcohol myths common misconceptions air travel",
+     ["alcohol myths common misconceptions travel","air travel alcohol myth ignorance","common alcohol myths travel flight"]),
+    ("healthy travel tips drink water airplane flight",
+     ["healthy travel tips drink water airplane","healthy airplane travel tips water drink","smart travel tips airplane water health"]),
+    ("subscribe channel travel aviation secrets tips",
+     ["subscribe channel travel aviation secrets","travel aviation channel subscribe tips","aviation secrets channel subscribe tips"]),
+    ("subscribe like comment channel notification travel",
+     ["subscribe like channel notification travel","travel channel subscribe comment notification","channel subscribe notification travel tips"]),
 ]
 
 # ── Build clip list (4-7s sub-clips per scene) ────────────────────────────────
