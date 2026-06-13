@@ -409,9 +409,9 @@ def build_xfade_chain(seg_paths, output):
     return r.returncode == 0
 
 
-def make_soft_whoosh(dst, duration=0.6):
-    """Generate a soft whoosh SFX (300→1800Hz sweep, gentle envelope)."""
-    expr = "sin(2*PI*(300+1500*t/0.6)*t)*0.5*exp(-2.5*t/0.6)"
+def make_soft_whoosh(dst, duration=0.4):
+    """Generate a sharp whoosh SFX (400→3900Hz sweep, fast decay)."""
+    expr = "sin(2*PI*(400+3500*t/0.4)*t)*0.5*exp(-4*t/0.4)"
     cmd = [FFMPEG,"-y","-f","lavfi",
            "-i",f"aevalsrc={expr}:s=44100:c=mono:d={duration}",
            "-c:a","aac","-b:a","128k", dst]
