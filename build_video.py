@@ -808,8 +808,14 @@ for i, clip in enumerate(CLIPS):
     raw_p = f"{RAWDIR}/r{i:04d}_{vid}.mp4"
 
     if not download(url, raw_p):
-        print(f"[{i:3d}] ✗ download failed")
-        seg_paths.append(None)
+        print(f"[{i:3d}] ✗ download failed — filling with black frame")
+        subprocess.run([FFMPEG,"-y","-f","lavfi",
+                        "-i",f"color=black:size=1280x720:rate=30:duration={dur:.3f}",
+                        "-c:v","libx264","-preset","fast","-an", seg_p],
+                       capture_output=True)
+        timeline.append((seg_p, cum_t, cum_t+dur, clip["scene_last"], False))
+        cum_t += dur
+        seg_paths.append(seg_p); clip_scores.append(0)
         continue
 
     actual_dur = get_dur(raw_p) or src_dur
@@ -861,7 +867,14 @@ for i, clip in enumerate(CLIPS):
                             cum_t += BROLL_DURATION
                             print(f"  [B-roll: {broll_queries[0][:40]}]")
     else:
-        print(f"  encode failed"); seg_paths.append(None)
+        print(f"  encode failed — filling with black frame")
+        subprocess.run([FFMPEG,"-y","-f","lavfi",
+                        "-i",f"color=black:size=1280x720:rate=30:duration={dur:.3f}",
+                        "-c:v","libx264","-preset","fast","-an", seg_p],
+                       capture_output=True)
+        timeline.append((seg_p, cum_t, cum_t+dur, clip["scene_last"], False))
+        cum_t += dur
+        seg_paths.append(seg_p); clip_scores.append(0)
 
     time.sleep(0.15)
 
