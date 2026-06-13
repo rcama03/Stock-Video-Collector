@@ -38,8 +38,10 @@ load_dotenv(os.path.join(os.path.dirname(__file__), "api_keys.env"))
 
 PEXELS_KEY       = os.getenv("PEXELS_API_KEY")
 PIXABAY_KEY      = os.getenv("PIXABAY_API_KEY")
-COVERR_KEY       = os.getenv("COVERR_API_KEY")
-FREEPIK_KEY      = os.getenv("FREEPIK_API_KEY")
+COVERR_KEY           = os.getenv("COVERR_API_KEY")
+VECTEEZY_SECRET_KEY  = os.getenv("VECTEEZY_SECRET_KEY")
+VECTEEZY_ACCOUNT_ID  = os.getenv("VECTEEZY_ACCOUNT_ID")
+FREEPIK_KEY          = os.getenv("FREEPIK_API_KEY")
 SHUTTERSTOCK_CLIENT_ID     = os.getenv("SHUTTERSTOCK_CLIENT_ID")
 SHUTTERSTOCK_CLIENT_SECRET = os.getenv("SHUTTERSTOCK_CLIENT_SECRET")
 ANTHROPIC_KEY    = os.getenv("ANTHROPIC_API_KEY")
@@ -319,6 +321,55 @@ def search_mixkit(queries, min_dur, top_n=6):
                     results.append((src, vid, dur, thumb))
                 if len(results) >= top_n: return results
         except Exception: pass
+        time.sleep(0.1)
+    return results
+
+def search_vecteezy(queries, min_dur, top_n=6):
+    """Search Vecteezy API v2 for stock videos."""
+    if not VECTEEZY_SECRET_KEY or not VECTEEZY_ACCOUNT_ID:
+        return []
+    results = []
+    headers = {
+        "Authorization": f"Bearer {VECTEEZY_SECRET_KEY}",
+        "Accept": "application/json",
+    }
+    for query in queries:
+        try:
+            r = requests.get(
+                f"https://api.vecteezy.com/v2/{VECTEEZY_ACCOUNT_ID}/resources",
+                params={"term": query, "content_type": "video", "per_page": top_n},
+                headers=headers, timeout=15,
+            )
+            if r.status_code != 200:
+                continue
+            data = r.json()
+            for item in data.get("resources", []):
+                vid = f"vz_{item['id']}"
+                if vid in used_ids:
+                    continue
+                # Get signed download URL
+                dl_r = requests.get(
+                    f"https://api.vecteezy.com/v2/{VECTEEZY_ACCOUNT_ID}/resources/{item['id']}/download",
+                    params={"size": "small"},
+                    headers=headers, timeout=10,
+                )
+                if dl_r.status_code != 200:
+                    continue
+                dl_data = dl_r.json()
+                url = dl_data.get("url") or dl_data.get("inline_url")
+                if not url:
+                    continue
+                thumb = item.get("thumbnail_url", "")
+                # Estimate duration from file size (~3MB/s for 720p video)
+                sizes = item.get("file_metadata", {}).get("available_file_types", [])
+                size_bytes = sizes[0].get("size_in_bytes", 0) if sizes else 0
+                est_dur = max(5, int(size_bytes / (3 * 1024 * 1024))) if size_bytes else 15
+                if est_dur >= min_dur:
+                    results.append((url, vid, est_dur, thumb))
+                if len(results) >= top_n:
+                    return results
+        except Exception as e:
+            print(f"  Vecteezy error: {e}")
         time.sleep(0.1)
     return results
 
@@ -721,6 +772,7 @@ for i, clip in enumerate(CLIPS):
         lambda: search_pixabay(queries, min_src, top_n=6),
         lambda: search_coverr(queries, min_src, top_n=6),
         lambda: search_mixkit(queries[:1], min_src, top_n=6),
+        lambda: search_vecteezy(queries, min_src, top_n=6),
     ]
     random.shuffle(_sources)
     for _src in _sources:
@@ -795,6 +847,7 @@ for i, clip in enumerate(CLIPS):
                 br_candidates += search_pixabay(broll_queries, BROLL_DURATION, top_n=6)
                 br_candidates += search_coverr(broll_queries, BROLL_DURATION, top_n=6)
                 br_candidates += search_mixkit(broll_queries[:1], BROLL_DURATION, top_n=4)
+                br_candidates += search_vecteezy(broll_queries, BROLL_DURATION, top_n=4)
                 br_url, br_vid, br_src_dur = best_candidate(br_candidates, broll_queries[0])
                 if br_url and br_vid not in used_ids:
                     used_ids.add(br_vid)
