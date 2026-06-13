@@ -624,13 +624,95 @@ if r.returncode != 0:
 else:
     print("Whoosh SFX generated.")
 
-# ── Scene plan ────────────────────────────────────────────────────────────────
-# Alcohol myths on plane video — 30 scenes
-# Total words: 1144
+# ── Scene plan — dynamic from script ─────────────────────────────────────────
 TOTAL_DUR = get_dur(AUDIO)
-RATE = TOTAL_DUR / 1144.0
 
-SCENE_WORDS = [37,35,31,32,40,38,38,37,33,34,35,35,34,34,40,41,46,41,44,42,37,35,38,46,41,40,39,39,37,45]
+def parse_script(script_path):
+    """Parse German script file into list of (scene_text, word_count) per scene."""
+    scenes = []
+    if not script_path or not os.path.exists(script_path):
+        return scenes
+    with open(script_path, encoding="utf-8") as f:
+        content = f.read()
+    blocks = re.split(r'\[SZENE\s+\d+[^\]]*\]', content)
+    for block in blocks[1:]:
+        text = block.strip()
+        if text:
+            words = len(text.split())
+            scenes.append((text, words))
+    return scenes
+
+def generate_scene_queries(scene_text):
+    """Use Claude to generate CLIP search queries for a scene's visual content."""
+    if not _anthropic_client:
+        words = scene_text.split()[:8]
+        desc = " ".join(words)
+        return (desc, [desc])
+    try:
+        msg = _anthropic_client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            messages=[{"role": "user", "content":
+                f"""This is a scene from a German travel/finance YouTube video voiceover:
+"{scene_text[:300]}"
+
+Generate:
+1. One short English visual description (max 8 words) of the best stock video clip for this scene
+2. Three English stock video search queries (max 6 words each) that would find relevant B-roll footage
+
+Reply in EXACTLY this format (no labels, no extra text):
+<desc>visual description here</desc>
+<q1>search query 1</q1>
+<q2>search query 2</q2>
+<q3>search query 3</q3>"""}]
+        )
+        text = msg.content[0].text
+        desc  = re.search(r'<desc>(.*?)</desc>', text)
+        q1    = re.search(r'<q1>(.*?)</q1>', text)
+        q2    = re.search(r'<q2>(.*?)</q2>', text)
+        q3    = re.search(r'<q3>(.*?)</q3>', text)
+        desc  = desc.group(1).strip() if desc else scene_text.split()[0]
+        queries = [q.group(1).strip() for q in [q1, q2, q3] if q]
+        if not queries:
+            queries = [desc]
+        return (desc, queries)
+    except Exception as e:
+        print(f"  Query gen error: {e}")
+        words = scene_text.split()[:6]
+        desc = " ".join(words)
+        return (desc, [desc])
+
+# Try to load script file — check argv[3] or find alongside audio
+_script_path = None
+if len(sys.argv) > 3:
+    _script_path = sys.argv[3]
+else:
+    # auto-detect: look for a .txt file with same base name as audio
+    _audio_base = os.path.splitext(AUDIO)[0]
+    for ext in [".txt", "_script.txt", "_german.txt"]:
+        if os.path.exists(_audio_base + ext):
+            _script_path = _audio_base + ext
+            break
+
+_scenes = parse_script(_script_path) if _script_path else []
+
+if _scenes:
+    total_words = sum(w for _, w in _scenes)
+    RATE = TOTAL_DUR / max(total_words, 1)
+    SCENE_WORDS = [w for _, w in _scenes]
+    print(f"Script loaded: {len(_scenes)} scenes, {total_words} words, rate={RATE:.3f}s/word")
+    print("Generating scene queries via Claude…")
+    SCENE_META = []
+    for i, (scene_text, _) in enumerate(_scenes):
+        desc, queries = generate_scene_queries(scene_text)
+        SCENE_META.append((desc, queries))
+        print(f"  Scene {i+1:2d}: {desc[:60]}")
+else:
+    # Fallback: single scene covering full audio
+    print("WARNING: No script found — using single generic scene")
+    RATE = 1.0
+    SCENE_WORDS = [int(TOTAL_DUR / 5.5)]
+    SCENE_META = [("travel airport airplane flight", ["travel airport airplane flight", "airplane passenger travel", "airport terminal travel"])]
 
 scene_starts = []
 t = 0.0
@@ -638,70 +720,6 @@ for w in SCENE_WORDS:
     scene_starts.append(round(t, 2))
     t += w * RATE
 scene_ends = scene_starts[1:] + [round(TOTAL_DUR, 2)]
-
-# (desc, [queries]) per scene — Alcohol myths on plane video
-SCENE_META = [
-    ("passenger drinking alcohol airplane cabin flight",
-     ["passenger drinking alcohol airplane cabin","drinking wine beer airplane flight","alcohol drink airplane passenger cabin"]),
-    ("airplane cabin pressure altitude flight stress body",
-     ["airplane cabin pressure altitude flight","low oxygen cabin pressure airplane flight","aircraft cabin altitude pressure body"]),
-    ("alcohol myths facts airplane travel lies",
-     ["alcohol myths facts airplane travel","alcohol drinking plane myths debunked","alcohol flight myths facts truth"]),
-    ("sleeping airplane sleep quality rest flight",
-     ["sleeping airplane sleep quality rest","passenger sleeping airplane seat flight","sleep airplane cabin night flight"]),
-    ("sleep study research quality alcohol effect",
-     ["sleep study research alcohol effect quality","sleep quality study alcohol research","sleep deprivation study alcohol effect"]),
-    ("airplane altitude flight higher effect body",
-     ["airplane altitude flight body effect","high altitude airplane flight body","aircraft cruising altitude flight effect"]),
-    ("airplane cabin air pressure oxygen blood",
-     ["airplane cabin air pressure oxygen blood","cabin pressure oxygen saturation blood","aircraft cabin pressure oxygen level"]),
-    ("wine tasting airplane taste different flight",
-     ["wine tasting airplane taste different","wine taste airplane cabin flight","drinking wine airplane different taste"]),
-    ("dry cabin air humidity airplane smell taste",
-     ["dry cabin air humidity airplane","low humidity airplane cabin air","aircraft cabin dry air humidity"]),
-    ("drunk driving car after flight landing airport",
-     ["drunk driving car after flight airport","driving airport after drinking flight","alcohol after flight driving impaired"]),
-    ("dehydration alcohol slower metabolism body flight",
-     ["dehydration alcohol body metabolism flight","alcohol dehydration body airplane slow","flight dehydration alcohol effect body"]),
-    ("airline drink service profit revenue alcohol",
-     ["airline drink service profit revenue alcohol","airline alcohol revenue profit service","airline beverage service alcohol profit"]),
-    ("alcohol beverage sales airline revenue billion",
-     ["alcohol beverage sales airline revenue","airline drinks revenue billion alcohol","airline alcohol sales revenue statistics"]),
-    ("calm relaxed passenger airplane drinking alcohol",
-     ["calm relaxed passenger airplane drinking","relaxed passenger airplane seat calm","drinking passenger airplane calm happy"]),
-    ("water drink hydration airplane tip health",
-     ["water drink hydration airplane tip","drinking water airplane hydration health","water hydration airplane flight health"]),
-    ("liver alcohol metabolism rate hour body",
-     ["liver alcohol metabolism rate body","alcohol breakdown liver rate hour","liver process alcohol body metabolism"]),
-    ("whiskey warm feeling cold airplane flight",
-     ["whiskey warm feeling cold airplane flight","alcohol warm body feeling cold","whiskey cold feeling airplane cabin"]),
-    ("long haul flight seat sitting temperature cabin",
-     ["long haul flight seat sitting temperature","long flight seat cabin temperature cool","long distance flight passenger seat cabin"]),
-    ("business class alcohol free drinks service premium",
-     ["business class alcohol free drinks service","business class airplane drinks premium service","premium cabin airplane alcohol service"]),
-    ("drunk passenger removed flight captain crew",
-     ["drunk passenger removed flight captain crew","disruptive drunk passenger airplane crew","intoxicated passenger flight crew remove"]),
-    ("drunk unruly passenger airplane incident statistics",
-     ["drunk unruly passenger airplane incident","alcohol incident airplane unruly passenger","airplane alcohol incident statistics flight"]),
-    ("medication sedative sleep pill mixing alcohol danger",
-     ["medication sedative sleep pill mixing alcohol","sleeping pill alcohol combination danger","sedative alcohol mix danger flight"]),
-    ("deep vein thrombosis DVT blood clot flight risk",
-     ["deep vein thrombosis blood clot flight risk","DVT blood clot airplane long flight","thrombosis risk airplane flight blood"]),
-    ("first class champagne luxury alcohol flight premium",
-     ["first class champagne luxury alcohol flight","champagne first class airplane premium","luxury first class airplane drink service"]),
-    ("frequent flyer doctor advice water airplane health",
-     ["frequent flyer doctor advice water airplane","flight doctor health advice airplane water","travel medicine advice airplane hydration"]),
-    ("jet lag alcohol worse circadian rhythm sleep",
-     ["jet lag alcohol worse circadian rhythm","alcohol jet lag circadian rhythm sleep","jet lag worsened alcohol sleep rhythm"]),
-    ("alcohol myths common misconceptions air travel",
-     ["alcohol myths common misconceptions travel","air travel alcohol myth ignorance","common alcohol myths travel flight"]),
-    ("healthy travel tips drink water airplane flight",
-     ["healthy travel tips drink water airplane","healthy airplane travel tips water drink","smart travel tips airplane water health"]),
-    ("subscribe channel travel aviation secrets tips",
-     ["subscribe channel travel aviation secrets","travel aviation channel subscribe tips","aviation secrets channel subscribe tips"]),
-    ("subscribe like comment channel notification travel",
-     ["subscribe like channel notification travel","travel channel subscribe comment notification","channel subscribe notification travel tips"]),
-]
 
 # ── Build clip list (4-7s sub-clips per scene) ────────────────────────────────
 CLIPS = []
