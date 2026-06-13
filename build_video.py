@@ -20,8 +20,8 @@ import numpy as np
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 FFMPEG   = "/usr/local/lib/python3.11/dist-packages/imageio_ffmpeg/binaries/ffmpeg-linux-x86_64-v7.0.2"
-AUDIO    = sys.argv[1] if len(sys.argv) > 1 else "/root/.claude/uploads/c6774b2d-5668-54de-9a4f-188c80ca845c/d2ecc5b3-full_voiceover.mp3"
-OUTPUT   = sys.argv[2] if len(sys.argv) > 2 else "/home/user/Stock-Video-Collector/priority_pass_video.mp4"
+AUDIO    = sys.argv[1] if len(sys.argv) > 1 else "/root/.claude/uploads/c6774b2d-5668-54de-9a4f-188c80ca845c/850be7ed-full_voiceover.mp3"
+OUTPUT   = sys.argv[2] if len(sys.argv) > 2 else "/home/user/Stock-Video-Collector/priority_pass_v2_video.mp4"
 WORK     = "/tmp/vbuild"
 RAWDIR   = f"{WORK}/raw"
 SEGDIR   = f"{WORK}/seg"
@@ -628,13 +628,14 @@ else:
 TOTAL_DUR = get_dur(AUDIO)
 
 def parse_script(script_path):
-    """Parse German script file into list of (scene_text, word_count) per scene."""
+    """Parse script file (German or English) into list of (scene_text, word_count)."""
     scenes = []
     if not script_path or not os.path.exists(script_path):
         return scenes
     with open(script_path, encoding="utf-8") as f:
         content = f.read()
-    blocks = re.split(r'\[SZENE\s+\d+[^\]]*\]', content)
+    # Support both [SZENE N] (German) and [SCENE N] (English)
+    blocks = re.split(r'\[(?:SZENE|SCENE)\s+\d+[^\]]*\]', content, flags=re.IGNORECASE)
     for block in blocks[1:]:
         text = block.strip()
         if text:
@@ -642,29 +643,44 @@ def parse_script(script_path):
             scenes.append((text, words))
     return scenes
 
-def generate_scene_queries(scene_text):
-    """Use Claude to generate CLIP search queries for a scene's visual content."""
+def generate_scene_queries(scene_text, is_english=False):
+    """Generate CLIP search queries. If English text, extract directly; else translate via Claude."""
     if not _anthropic_client:
         words = scene_text.split()[:8]
         desc = " ".join(words)
         return (desc, [desc])
     try:
-        msg = _anthropic_client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=200,
-            messages=[{"role": "user", "content":
-                f"""This is a scene from a German travel/finance YouTube video voiceover:
+        if is_english:
+            prompt = f"""This is a scene from a travel/finance YouTube video:
+"{scene_text[:300]}"
+
+Generate:
+1. One short visual description (max 8 words) of the best stock video clip for this scene
+2. Three stock video search queries (max 6 words each) for relevant B-roll footage
+
+Reply in EXACTLY this format:
+<desc>visual description here</desc>
+<q1>search query 1</q1>
+<q2>search query 2</q2>
+<q3>search query 3</q3>"""
+        else:
+            prompt = f"""This is a scene from a German travel/finance YouTube video voiceover:
 "{scene_text[:300]}"
 
 Generate:
 1. One short English visual description (max 8 words) of the best stock video clip for this scene
-2. Three English stock video search queries (max 6 words each) that would find relevant B-roll footage
+2. Three English stock video search queries (max 6 words each) for relevant B-roll footage
 
-Reply in EXACTLY this format (no labels, no extra text):
+Reply in EXACTLY this format:
 <desc>visual description here</desc>
 <q1>search query 1</q1>
 <q2>search query 2</q2>
-<q3>search query 3</q3>"""}]
+<q3>search query 3</q3>"""
+
+        msg = _anthropic_client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            messages=[{"role": "user", "content": prompt}]
         )
         text = msg.content[0].text
         desc  = re.search(r'<desc>(.*?)</desc>', text)
@@ -682,29 +698,31 @@ Reply in EXACTLY this format (no labels, no extra text):
         desc = " ".join(words)
         return (desc, [desc])
 
-# Try to load script file — check argv[3] or find alongside audio
-_script_path = None
-if len(sys.argv) > 3:
-    _script_path = sys.argv[3]
-else:
-    # auto-detect: look for a .txt file with same base name as audio
-    _audio_base = os.path.splitext(AUDIO)[0]
-    for ext in [".txt", "_script.txt", "_german.txt"]:
-        if os.path.exists(_audio_base + ext):
-            _script_path = _audio_base + ext
-            break
+# Load scripts — argv[3]=German script for timing, argv[4]=English script for queries
+# If only one script passed, auto-detect language
+_german_script_path = sys.argv[3] if len(sys.argv) > 3 else None
+_english_script_path = sys.argv[4] if len(sys.argv) > 4 else None
 
-_scenes = parse_script(_script_path) if _script_path else []
+_german_scenes  = parse_script(_german_script_path)  if _german_script_path  else []
+_english_scenes = parse_script(_english_script_path) if _english_script_path else []
+
+# Use German for word-count timing, English for query generation (if available)
+_timing_scenes = _german_scenes if _german_scenes else _english_scenes
+_query_scenes  = _english_scenes if _english_scenes else _german_scenes
+_is_english    = bool(_english_scenes)
+
+_scenes = _timing_scenes
 
 if _scenes:
     total_words = sum(w for _, w in _scenes)
     RATE = TOTAL_DUR / max(total_words, 1)
     SCENE_WORDS = [w for _, w in _scenes]
-    print(f"Script loaded: {len(_scenes)} scenes, {total_words} words, rate={RATE:.3f}s/word")
+    src_label = "German+English" if (_german_scenes and _english_scenes) else ("English" if _is_english else "German")
+    print(f"Script loaded ({src_label}): {len(_scenes)} scenes, {total_words} words, rate={RATE:.3f}s/word")
     print("Generating scene queries via Claude…")
     SCENE_META = []
-    for i, (scene_text, _) in enumerate(_scenes):
-        desc, queries = generate_scene_queries(scene_text)
+    for i, (scene_text, _) in enumerate(_query_scenes):
+        desc, queries = generate_scene_queries(scene_text, is_english=_is_english)
         SCENE_META.append((desc, queries))
         print(f"  Scene {i+1:2d}: {desc[:60]}")
 else:
