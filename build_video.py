@@ -814,6 +814,17 @@ for i, clip in enumerate(CLIPS):
     for _src in _sources:
         candidates += _src()
 
+    def _try_candidates(pool, label=""):
+        """Try downloading from pool in order; return (url, vid, src_dur, raw_p) or None."""
+        for _url, _vid, _sdur, *_ in pool:
+            if _vid in used_ids:
+                continue
+            _raw = f"{RAWDIR}/r{i:04d}_{_vid}.mp4"
+            if download(_url, _raw):
+                return _url, _vid, _sdur, _raw
+            print(f"  DL retry failed{' ('+label+')' if label else ''}: {_vid}")
+        return None
+
     url, vid, src_dur = best_candidate(candidates, desc)
 
     # fallback: generic airport/travel clip
@@ -825,11 +836,11 @@ for i, clip in enumerate(CLIPS):
             _fb += _src()
             if _fb: break
         if _fb:
+            candidates = _fb
             url, vid, src_dur = best_candidate(_fb, "airport travel")
             print(f"  → using generic airport fallback")
 
     if not url:
-        # fallback: black frame
         print(f"[{i:3d}] ✗ no clip — black frame")
         subprocess.run([FFMPEG,"-y","-f","lavfi",
                         f"-i",f"color=black:size=1280x720:rate=30:duration={dur:.3f}",
@@ -844,15 +855,25 @@ for i, clip in enumerate(CLIPS):
     raw_p = f"{RAWDIR}/r{i:04d}_{vid}.mp4"
 
     if not download(url, raw_p):
-        print(f"[{i:3d}] ✗ download failed — filling with black frame")
-        subprocess.run([FFMPEG,"-y","-f","lavfi",
-                        "-i",f"color=black:size=1280x720:rate=30:duration={dur:.3f}",
-                        "-c:v","libx264","-preset","fast","-an", seg_p],
-                       capture_output=True)
-        timeline.append((seg_p, cum_t, cum_t+dur, clip["scene_last"], False))
-        cum_t += dur
-        seg_paths.append(seg_p); clip_scores.append(0)
-        continue
+        # First choice failed — try remaining candidates before giving up
+        print(f"[{i:3d}] ✗ download failed — trying alternatives…")
+        used_ids.discard(vid)
+        _remaining = [c for c in candidates if c[1] != vid and c[1] not in used_ids]
+        _result = _try_candidates(_remaining, "alt")
+        if _result:
+            url, vid, src_dur, raw_p = _result
+            used_ids.add(vid)
+            print(f"  → recovered with alternative clip {vid}")
+        else:
+            print(f"[{i:3d}] ✗ all alternatives failed — black frame")
+            subprocess.run([FFMPEG,"-y","-f","lavfi",
+                            "-i",f"color=black:size=1280x720:rate=30:duration={dur:.3f}",
+                            "-c:v","libx264","-preset","fast","-an", seg_p],
+                           capture_output=True)
+            timeline.append((seg_p, cum_t, cum_t+dur, clip["scene_last"], False))
+            cum_t += dur
+            seg_paths.append(seg_p); clip_scores.append(0)
+            continue
 
     actual_dur = get_dur(raw_p) or src_dur
 
