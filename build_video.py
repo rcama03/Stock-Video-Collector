@@ -126,27 +126,41 @@ def clip_score_url(url, text):
     return clip_score(p, text) if os.path.exists(p) else 0.0
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-# Cross-video dedup: persist clip IDs used in past videos so the same footage
-# never repeats across different videos. Within a build, used_ids also prevents
-# reusing a clip twice in the same video.
+# Cross-video dedup with a cooldown window: a clip used in a recent video is
+# excluded, but becomes reusable again after DEDUP_COOLDOWN builds. This keeps
+# footage fresh across videos without permanently exhausting the (limited,
+# aviation-themed) clip pool. History maps clip_id -> build number it was used.
 USED_HISTORY_FILE = os.path.join(os.path.dirname(__file__), ".used_clips.json")
+DEDUP_COOLDOWN    = 7   # number of recent builds whose clips are blocked
 
-def _load_used_history():
+def _load_history():
+    """Return (history dict {clip_id: build_no}, current_build_no)."""
     try:
         with open(USED_HISTORY_FILE, encoding="utf-8") as f:
-            return set(json.load(f))
+            data = json.load(f)
+        if isinstance(data, dict) and "clips" in data:
+            hist = data["clips"]
+            cur  = int(data.get("build", max(hist.values(), default=0))) + 1
+            return hist, cur
+        # legacy flat-list format → treat all as build 1
+        if isinstance(data, list):
+            return {cid: 1 for cid in data}, 2
     except Exception:
-        return set()
+        pass
+    return {}, 1
 
-def _save_used_history(ids):
+def _save_history(history, build_no):
     try:
         with open(USED_HISTORY_FILE, "w", encoding="utf-8") as f:
-            json.dump(sorted(ids), f)
+            json.dump({"build": build_no, "clips": history}, f)
     except Exception as e:
         print(f"  Warning: could not save clip history: {e}")
 
-used_ids = _load_used_history()
-print(f"Loaded {len(used_ids)} previously-used clip IDs (cross-video dedup)")
+_clip_history, BUILD_NO = _load_history()
+# Block only clips used within the cooldown window; older ones are reusable.
+used_ids = {cid for cid, b in _clip_history.items() if BUILD_NO - b < DEDUP_COOLDOWN}
+print(f"Build #{BUILD_NO}: {len(used_ids)} clips blocked "
+      f"(cooldown {DEDUP_COOLDOWN} builds), {len(_clip_history)} total in history")
 
 def get_dur(p):
     r = subprocess.run([FFMPEG,"-i",p], capture_output=True, text=True)
@@ -1101,9 +1115,13 @@ print(f"   Clips    : {len(valid)}")
 print(f"   Avg CLIP : {avg_s:.3f}")
 print(f"   Sources  : " + ", ".join(f"{k}={v}" for k, v in sorted(source_counts.items(), key=lambda x: -x[1])))
 
-# Persist this build's clip IDs so they never repeat in future videos
-_save_used_history(used_ids | session_used)
-print(f"   Saved {len(session_used)} new clip IDs to cross-video history")
+# Record this build's clip IDs with the current build number; they'll be
+# blocked from the next DEDUP_COOLDOWN videos, then become reusable again.
+for _cid in session_used:
+    _clip_history[_cid] = BUILD_NO
+_save_history(_clip_history, BUILD_NO)
+print(f"   Recorded {len(session_used)} clip IDs for build #{BUILD_NO} "
+      f"(reusable again after {DEDUP_COOLDOWN} builds)")
 
 # ── Push-to-GitHub size: compress only if over 90MB, keep quality high ───────
 if size > 90:
