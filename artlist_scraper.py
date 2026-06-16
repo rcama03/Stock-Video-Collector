@@ -1878,6 +1878,80 @@ SiteProfile.register(SiteProfile(
 ))
 
 SiteProfile.register(SiteProfile(
+    'Coverr',
+    description='Coverr.co free CC0 stock videos — MP4 downloads',
+    domains=['coverr.co', 'www.coverr.co'],
+    start_url='https://coverr.co/stock-video-footage',
+    catalog_patterns=['/stock-video-footage', '/categories/', '/search'],
+    item_patterns=['/footage/'],
+    item_url_regex=r'coverr\.co/footage/[^/?#]+',
+    video_types=['mp4', 'webm'],
+    scroll_items=True,
+    og_fallback=True,
+    jsonld_fallback=True,
+))
+
+SiteProfile.register(SiteProfile(
+    'Videvo',
+    description='Videvo.net free stock video clips — MP4/WebM',
+    domains=['videvo.net', 'www.videvo.net'],
+    start_url='https://www.videvo.net/free-video-footage/',
+    catalog_patterns=['/free-video-footage/', '/stock-video-footage/', '/search/'],
+    item_patterns=['/video/'],
+    item_url_regex=r'videvo\.net/video/[^/?#]+',
+    video_types=['mp4', 'webm'],
+    scroll_items=True,
+    og_fallback=True,
+    jsonld_fallback=True,
+    load_more_selector='[class*="load-more"], [class*="LoadMore"], button[class*="more"]',
+    load_more_clicks=10,
+))
+
+SiteProfile.register(SiteProfile(
+    'Mazwai',
+    description='Mazwai.com curated cinematic CC3 stock clips — MP4',
+    domains=['mazwai.com', 'www.mazwai.com'],
+    start_url='https://mazwai.com/',
+    catalog_patterns=['/'],
+    item_patterns=['/video/'],
+    item_url_regex=r'mazwai\.com/#?video/\d+',
+    video_types=['mp4', 'webm'],
+    scroll_items=True,
+    og_fallback=True,
+    jsonld_fallback=True,
+))
+
+SiteProfile.register(SiteProfile(
+    'LifeOfVids',
+    description='Lifeofvids.com free CC0 urban & nature video clips',
+    domains=['lifeofvids.com', 'www.lifeofvids.com'],
+    start_url='https://www.lifeofvids.com/',
+    catalog_patterns=['/'],
+    item_patterns=['/video/'],
+    item_url_regex=r'lifeofvids\.com/video/[^/?#]+',
+    video_types=['mp4', 'webm'],
+    scroll_items=True,
+    og_fallback=True,
+    jsonld_fallback=True,
+))
+
+SiteProfile.register(SiteProfile(
+    'Mixkit',
+    description='Mixkit.co free stock video clips (Envato) — MP4',
+    domains=['mixkit.co', 'www.mixkit.co'],
+    start_url='https://mixkit.co/free-stock-video/',
+    catalog_patterns=['/free-stock-video/'],
+    item_patterns=['/free-stock-video/'],
+    item_url_regex=r'mixkit\.co/free-stock-video/[^/?#]+-\d+',
+    video_types=['mp4', 'webm'],
+    scroll_items=True,
+    og_fallback=True,
+    jsonld_fallback=True,
+    load_more_selector='[class*="load-more"], [data-testid*="load"]',
+    load_more_clicks=10,
+))
+
+SiteProfile.register(SiteProfile(
     'Generic',
     description='Auto-detect video streams on any site (M3U8, MP4, WebM, DASH)',
     domains=[],  # allow all
@@ -2628,7 +2702,7 @@ class CrawlerWorker(QThread):
             if not meta['title']:
                 pt = await page.title()
                 meta['title'] = re.sub(
-                    r'\s*[|–-]\s*(Stock Footage|Artlist|Pexels|Pixabay|Storyblocks|Free).*$',
+                    r'\s*[|–-]\s*(Stock Footage|Artlist|Pexels|Pixabay|Storyblocks|Coverr|Videvo|Mazwai|Life of Vids|Mixkit|Free).*$',
                     '', pt, flags=re.IGNORECASE).strip()
 
             # ── Post-processing ───────────────────────────────────────────
