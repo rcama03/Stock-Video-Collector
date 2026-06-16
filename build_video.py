@@ -126,7 +126,27 @@ def clip_score_url(url, text):
     return clip_score(p, text) if os.path.exists(p) else 0.0
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-used_ids = set()
+# Cross-video dedup: persist clip IDs used in past videos so the same footage
+# never repeats across different videos. Within a build, used_ids also prevents
+# reusing a clip twice in the same video.
+USED_HISTORY_FILE = os.path.join(os.path.dirname(__file__), ".used_clips.json")
+
+def _load_used_history():
+    try:
+        with open(USED_HISTORY_FILE, encoding="utf-8") as f:
+            return set(json.load(f))
+    except Exception:
+        return set()
+
+def _save_used_history(ids):
+    try:
+        with open(USED_HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(sorted(ids), f)
+    except Exception as e:
+        print(f"  Warning: could not save clip history: {e}")
+
+used_ids = _load_used_history()
+print(f"Loaded {len(used_ids)} previously-used clip IDs (cross-video dedup)")
 
 def get_dur(p):
     r = subprocess.run([FFMPEG,"-i",p], capture_output=True, text=True)
@@ -373,13 +393,23 @@ def search_vecteezy(queries, min_dur, top_n=6):
         time.sleep(0.1)
     return results
 
-def best_candidate(candidates, desc):
-    """Step 1: CLIP-score all candidate thumbnails, return best (url, vid, dur)."""
+# Diversity weighting: penalize sources that already dominate the video so
+# relevant clips from under-used sources get a fair chance. Tuned against the
+# typical CLIP score spread (~0.18-0.33) so it nudges, never overrides, relevance.
+DIVERSITY_PENALTY = 0.06
+
+def best_candidate(candidates, desc, source_counts=None, total_clips=0):
+    """Step 1: CLIP-score all candidate thumbnails, return best (url, vid, dur).
+    If source_counts given, apply a diversity penalty to over-represented sources."""
     if not candidates:
         return None, None, 0
     scored = []
     for url, vid, dur, thumb in candidates:
         s = clip_score_url(thumb, desc) if thumb else 0.0
+        if source_counts and total_clips > 0:
+            src = vid.split("_")[0] if "_" in vid else "?"
+            share = source_counts.get(src, 0) / total_clips
+            s -= DIVERSITY_PENALTY * share
         scored.append((s, url, vid, dur))
     scored.sort(reverse=True)
     _, url, vid, dur = scored[0]
@@ -793,6 +823,8 @@ clip_scores = []
 timeline    = []   # (seg_path, start_t, end_t, is_whoosh, is_cta)
 cum_t       = 0.0
 cta_inserted= set()
+source_counts = {}  # how many clips each source has contributed (for diversity)
+session_used  = set()  # clip IDs used in THIS build (saved to history at end)
 
 for i, clip in enumerate(CLIPS):
     desc    = clip["desc"]
@@ -840,7 +872,8 @@ for i, clip in enumerate(CLIPS):
             print(f"  DL retry failed{' ('+label+')' if label else ''}: {_vid}")
         return None
 
-    url, vid, src_dur = best_candidate(candidates, desc)
+    url, vid, src_dur = best_candidate(candidates, desc,
+                                       source_counts=source_counts, total_clips=len(seg_paths))
 
     # fallback: generic airport/travel clip
     if not url:
@@ -915,6 +948,8 @@ for i, clip in enumerate(CLIPS):
         timeline.append((seg_p, cum_t, cum_t+dur, clip["scene_last"], False))
         cum_t += dur
         seg_paths.append(seg_p); clip_scores.append(best_s)
+        source_counts[src_tag] = source_counts.get(src_tag, 0) + 1
+        session_used.add(vid)
 
         # ── B-roll cutaway every N clips ──────────────────────────────────
         if (i + 1) % BROLL_EVERY_N_CLIPS == 0:
@@ -1064,6 +1099,11 @@ print(f"   Sync gap : {sync_diff:.2f}s {'✓' if sync_diff < 2 else '⚠ check s
 print(f"   Size     : {size:.1f} MB")
 print(f"   Clips    : {len(valid)}")
 print(f"   Avg CLIP : {avg_s:.3f}")
+print(f"   Sources  : " + ", ".join(f"{k}={v}" for k, v in sorted(source_counts.items(), key=lambda x: -x[1])))
+
+# Persist this build's clip IDs so they never repeat in future videos
+_save_used_history(used_ids | session_used)
+print(f"   Saved {len(session_used)} new clip IDs to cross-video history")
 
 # ── Push-to-GitHub size: compress only if over 90MB, keep quality high ───────
 if size > 90:
