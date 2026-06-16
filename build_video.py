@@ -651,35 +651,49 @@ def generate_scene_queries(scene_text, is_english=False):
         return (desc, [desc])
     try:
         if is_english:
-            prompt = f"""This is a scene from a travel/finance YouTube video:
+            prompt = f"""You are a stock video researcher for a YouTube channel. This is a scene from a travel/aviation video:
 "{scene_text[:300]}"
 
+Generate stock video search queries that are SPECIFIC and VARIED — avoid generic terms like "airplane cabin" or "airport terminal" unless the scene is literally about those. Instead, focus on the EMOTION, ACTION, or SPECIFIC SUBJECT of the scene.
+
 Generate:
-1. One short visual description (max 8 words) of the best stock video clip for this scene
-2. Three stock video search queries (max 6 words each) for relevant B-roll footage
+1. One short visual description (max 8 words) of the ideal stock clip — be specific and concrete
+2. Four search queries (max 6 words each): make each one different in angle:
+   - q1: the specific action or subject happening
+   - q2: the emotion or human element
+   - q3: a broader thematic term (profession, situation, context)
+   - q4: a creative/metaphorical alternative that captures the mood
 
 Reply in EXACTLY this format:
 <desc>visual description here</desc>
 <q1>search query 1</q1>
 <q2>search query 2</q2>
-<q3>search query 3</q3>"""
+<q3>search query 3</q3>
+<q4>search query 4</q4>"""
         else:
-            prompt = f"""This is a scene from a German travel/finance YouTube video voiceover:
+            prompt = f"""You are a stock video researcher for a YouTube channel. This is a scene from a German travel/aviation video voiceover:
 "{scene_text[:300]}"
 
+Generate English stock video search queries that are SPECIFIC and VARIED — avoid generic terms like "airplane cabin" or "airport terminal" unless the scene is literally about those. Instead, focus on the EMOTION, ACTION, or SPECIFIC SUBJECT of the scene.
+
 Generate:
-1. One short English visual description (max 8 words) of the best stock video clip for this scene
-2. Three English stock video search queries (max 6 words each) for relevant B-roll footage
+1. One short English visual description (max 8 words) of the ideal stock clip — be specific and concrete
+2. Four English search queries (max 6 words each): make each one different in angle:
+   - q1: the specific action or subject happening
+   - q2: the emotion or human element
+   - q3: a broader thematic term (profession, situation, context)
+   - q4: a creative/metaphorical alternative that captures the mood
 
 Reply in EXACTLY this format:
 <desc>visual description here</desc>
 <q1>search query 1</q1>
 <q2>search query 2</q2>
-<q3>search query 3</q3>"""
+<q3>search query 3</q3>
+<q4>search query 4</q4>"""
 
         msg = _anthropic_client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=200,
+            max_tokens=300,
             messages=[{"role": "user", "content": prompt}]
         )
         text = msg.content[0].text
@@ -687,8 +701,9 @@ Reply in EXACTLY this format:
         q1    = re.search(r'<q1>(.*?)</q1>', text)
         q2    = re.search(r'<q2>(.*?)</q2>', text)
         q3    = re.search(r'<q3>(.*?)</q3>', text)
+        q4    = re.search(r'<q4>(.*?)</q4>', text)
         desc  = desc.group(1).strip() if desc else scene_text.split()[0]
-        queries = [q.group(1).strip() for q in [q1, q2, q3] if q]
+        queries = [q.group(1).strip() for q in [q1, q2, q3, q4] if q]
         if not queries:
             queries = [desc]
         return (desc, queries)
@@ -804,11 +819,11 @@ for i, clip in enumerate(CLIPS):
     min_src = dur + 2
     candidates = []
     _sources = [
-        lambda: search_pexels(queries, min_src, top_n=8),
-        lambda: search_pixabay(queries, min_src, top_n=6),
-        lambda: search_coverr(queries, min_src, top_n=6),
-        lambda: search_mixkit(queries[:1], min_src, top_n=6),
-        lambda: search_vecteezy(queries, min_src, top_n=6),
+        lambda: search_pexels(queries, min_src, top_n=15),
+        lambda: search_pixabay(queries, min_src, top_n=12),
+        lambda: search_coverr(queries, min_src, top_n=10),
+        lambda: search_mixkit(queries[:2], min_src, top_n=10),
+        lambda: search_vecteezy(queries, min_src, top_n=10),
     ]
     random.shuffle(_sources)
     for _src in _sources:
