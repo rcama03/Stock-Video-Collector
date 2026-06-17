@@ -16,3 +16,4 @@ api_keys.env
 !cta_preview_v2.mp4
 used_clip_ids.json
 .used_clips.json
+sample_*.mp4
