@@ -329,28 +329,46 @@ def search_shutterstock(queries, min_dur, top_n=6):
         time.sleep(0.1)
     return results
 
-def search_mixkit(queries, min_dur, top_n=6):
-    """Scrape Mixkit free stock video search results."""
-    results = []
+_MIXKIT_STOPWORDS = {"the","a","an","of","on","in","at","to","and","with","for",
+                     "person","people","close","up","shot","footage","video","clip"}
+
+def _mixkit_slugs(queries):
+    """Build candidate Mixkit tag slugs. Mixkit URLs are tag-based, so full
+    phrases ('flight-attendant') usually 404 to an empty page — single
+    keywords ('airport', 'pilot', 'airplane') are far more likely to be real
+    tags. Try full slug first, then significant individual words."""
+    slugs = []
     for query in queries:
+        full = query.replace(" ", "-").lower()
+        if full not in slugs:
+            slugs.append(full)
+        for word in query.lower().split():
+            word = re.sub(r'[^a-z]', '', word)
+            if len(word) >= 4 and word not in _MIXKIT_STOPWORDS and word not in slugs:
+                slugs.append(word)
+    return slugs
+
+def search_mixkit(queries, min_dur, top_n=6):
+    """Scrape Mixkit free stock video search results (tag-based pages)."""
+    results = []
+    for slug in _mixkit_slugs(queries):
         try:
-            slug = query.replace(" ", "-").lower()
             r = requests.get(f"https://mixkit.co/free-stock-video/{slug}/",
                              headers={"User-Agent":"Mozilla/5.0"},
                              timeout=20)
             if r.status_code != 200: continue
-            html = r.text
-            # Extract video IDs
-            import re as _re
-            ids = _re.findall(r'assets\.mixkit\.co/videos/(\d+)/\1-(?:720|1080)\.mp4', html)
+            # Capture every distinct video ID referenced on the page, regardless
+            # of the resolution listed (720 mp4 exists for all of them).
+            ids = []
+            for m in re.findall(r'assets\.mixkit\.co/videos/(\d+)/', r.text):
+                if m not in ids:
+                    ids.append(m)
             for vid_id in ids:
                 vid = f"mx_{vid_id}"
                 if vid in used_ids: continue
-                # Build URLs
                 src   = f"https://assets.mixkit.co/videos/{vid_id}/{vid_id}-720.mp4"
                 thumb = f"https://assets.mixkit.co/videos/{vid_id}/{vid_id}-thumb-360-0.jpg"
-                # Check duration via quick HEAD request not feasible — assume 10-30s
-                dur = 15
+                dur = 15  # Mixkit clips are typically 10-30s; duration not in listing
                 if dur >= min_dur:
                     results.append((src, vid, dur, thumb))
                 if len(results) >= top_n: return results
