@@ -70,7 +70,7 @@ CTA_DURATION  = 4.2   # seconds (slide_in + hold + slide_out)
 # Hard rule: never more than MAX_CONSECUTIVE_IMAGES stills in a row (avoid a
 # slideshow feel). Only triggers when the best video CLIP score is below
 # IMAGE_FALLBACK_THRESHOLD *and* the best image actually scores higher.
-IMAGE_FALLBACK_THRESHOLD = 0.18
+IMAGE_FALLBACK_THRESHOLD = float(os.getenv("IMAGE_FALLBACK_THRESHOLD", "0.18"))
 MAX_CONSECUTIVE_IMAGES   = 2
 
 # ── CLIP model ───────────────────────────────────────────────────────────────
