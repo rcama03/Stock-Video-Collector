@@ -428,20 +428,23 @@ def search_vecteezy(queries, min_dur, top_n=6):
 # Diversity weighting: penalize sources that already dominate the video so
 # relevant clips from under-used sources get a fair chance. Tuned against the
 # typical CLIP score spread (~0.18-0.33) so it nudges, never overrides, relevance.
-DIVERSITY_PENALTY = 0.06
+DIVERSITY_PENALTY = 0.12
+SOURCE_HARD_CAP   = 0.50   # no single source can exceed 50% of total clips
 
 def best_candidate(candidates, desc, source_counts=None, total_clips=0):
     """Step 1: CLIP-score all candidate thumbnails, return best (url, vid, dur).
-    If source_counts given, apply a diversity penalty to over-represented sources."""
+    Applies diversity penalty to over-represented sources and enforces a hard cap."""
     if not candidates:
         return None, None, 0
     scored = []
     for url, vid, dur, thumb in candidates:
         s = clip_score_url(thumb, desc) if thumb else 0.0
+        src = vid.split("_")[0] if "_" in vid else "?"
         if source_counts and total_clips > 0:
-            src = vid.split("_")[0] if "_" in vid else "?"
             share = source_counts.get(src, 0) / total_clips
             s -= DIVERSITY_PENALTY * share
+            if total_clips >= 10 and share >= SOURCE_HARD_CAP:
+                s -= 0.5  # effectively disqualifies this source
         scored.append((s, url, vid, dur))
     scored.sort(reverse=True)
     _, url, vid, dur = scored[0]
@@ -1092,7 +1095,7 @@ if has_whoosh:
     r = subprocess.run([FFMPEG,"-y",
                         "-i", AUDIO, "-i", whoosh_track,
                         "-filter_complex",
-                        "[0:a][1:a]amix=inputs=2:normalize=0[aout]",
+                        "[0:a]volume=1.8[v0];[v0][1:a]amix=inputs=2:normalize=0[aout]",
                         "-map","[aout]","-c:a","aac","-b:a","128k", mixed],
                        capture_output=True)
     if r.returncode != 0:
