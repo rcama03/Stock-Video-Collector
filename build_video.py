@@ -28,8 +28,9 @@ SEGDIR   = f"{WORK}/seg"
 FRMDIR   = f"{WORK}/frames"
 THUMBDIR = f"{WORK}/thumbs"
 CTADIR   = f"{WORK}/cta"
+IMGDIR   = f"{WORK}/img"
 
-for d in [RAWDIR, SEGDIR, FRMDIR, THUMBDIR, CTADIR]:
+for d in [RAWDIR, SEGDIR, FRMDIR, THUMBDIR, CTADIR, IMGDIR]:
     os.makedirs(d, exist_ok=True)
 
 # ── Config ───────────────────────────────────────────────────────────────────
@@ -45,6 +46,7 @@ FREEPIK_KEY          = os.getenv("FREEPIK_API_KEY")
 SHUTTERSTOCK_CLIENT_ID     = os.getenv("SHUTTERSTOCK_CLIENT_ID")
 SHUTTERSTOCK_CLIENT_SECRET = os.getenv("SHUTTERSTOCK_CLIENT_SECRET")
 ANTHROPIC_KEY    = os.getenv("ANTHROPIC_API_KEY")
+UNSPLASH_KEY     = os.getenv("UNSPLASH_API_KEY")
 
 # B-roll config
 BROLL_EVERY_N_CLIPS = 8    # insert b-roll after every N main clips
@@ -62,6 +64,14 @@ ZPUNCH_DUR    = 0.3
 
 CTA_POSITIONS = [0.25, 0.50, 0.75]
 CTA_DURATION  = 4.2   # seconds (slide_in + hold + slide_out)
+
+# Image fallback: when no source returns a good-enough video clip for a slot,
+# fetch a still image (Pexels/Pixabay/Unsplash) and apply a Ken Burns move.
+# Hard rule: never more than MAX_CONSECUTIVE_IMAGES stills in a row (avoid a
+# slideshow feel). Only triggers when the best video CLIP score is below
+# IMAGE_FALLBACK_THRESHOLD *and* the best image actually scores higher.
+IMAGE_FALLBACK_THRESHOLD = 0.18
+MAX_CONSECUTIVE_IMAGES   = 2
 
 # ── CLIP model ───────────────────────────────────────────────────────────────
 print("Loading CLIP model…")
@@ -484,6 +494,92 @@ def make_seg(src, dst, duration, start_offset=0.0, scene_last=False, ken_burns=F
     return subprocess.run(cmd, capture_output=True).returncode == 0
 
 
+def search_images(queries, top_n=12):
+    """Return list of (img_url, img_id, thumb_url) still-image candidates.
+    Order: Pexels photos → Pixabay photos → Unsplash (last, rate-limited 50/hr).
+    Only photos suitable for Ken Burns — no vectors/graphics."""
+    results = []
+    # ── Pexels photos ──
+    try:
+        for query in queries:
+            r = requests.get("https://api.pexels.com/v1/search",
+                             headers={"Authorization": PEXELS_KEY},
+                             params={"query":query,"per_page":8,"orientation":"landscape"},
+                             timeout=20)
+            if r.status_code == 200:
+                for p in r.json().get("photos",[]):
+                    iid = f"pximg_{p['id']}"
+                    if iid in used_ids: continue
+                    src  = p.get("src",{})
+                    full = src.get("large2x") or src.get("large") or src.get("original")
+                    if not full: continue
+                    results.append((full, iid, src.get("medium") or full))
+            if len(results) >= top_n: break
+            time.sleep(0.1)
+    except Exception: pass
+    # ── Pixabay photos ──
+    try:
+        for query in queries:
+            r = requests.get("https://pixabay.com/api/",
+                             params={"key":PIXABAY_KEY,"q":query,"image_type":"photo",
+                                     "per_page":8,"min_width":1280,"orientation":"horizontal"},
+                             timeout=20)
+            if r.status_code == 200:
+                for p in r.json().get("hits",[]):
+                    iid = f"pbimg_{p['id']}"
+                    if iid in used_ids: continue
+                    full = p.get("largeImageURL") or p.get("webformatURL")
+                    if not full: continue
+                    results.append((full, iid, p.get("webformatURL") or full))
+            if len(results) >= top_n: break
+            time.sleep(0.1)
+    except Exception: pass
+    # ── Unsplash (last; demo tier = 50 req/hr, so query only the top term) ──
+    if UNSPLASH_KEY:
+        try:
+            r = requests.get("https://api.unsplash.com/search/photos",
+                             headers={"Authorization": f"Client-ID {UNSPLASH_KEY}"},
+                             params={"query":queries[0],"per_page":5,"orientation":"landscape"},
+                             timeout=20)
+            if r.status_code == 200:
+                for p in r.json().get("results",[]):
+                    iid = f"usimg_{p['id']}"
+                    if iid in used_ids: continue
+                    raw = p.get("urls",{}).get("raw")
+                    if not raw: continue
+                    full = f"{raw}&w=1920&fm=jpg&q=85"
+                    results.append((full, iid, p["urls"].get("small") or full))
+        except Exception: pass
+    return results
+
+
+def make_image_segment(src, dst, duration, scene_last=False):
+    """Encode a still image into a video segment with a randomized Ken Burns move.
+    Uses zoompan with d=1 driven by the global output frame counter `on`, so the
+    motion is smooth across the whole clip (no per-frame jumps)."""
+    frames = max(1, int(round(duration * 30)))
+    base   = ("scale=2560:1440:force_original_aspect_ratio=increase,"
+              "crop=2560:1440,setsar=1")
+    step   = 0.20 / frames   # total zoom travel of 0.20 over the clip
+    move   = random.choice(["in", "out", "panr", "panl"])
+    if move == "in":
+        zp = (f"zoompan=z='min(1.0+on*{step:.7f},1.20)':d=1:"
+              f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1280x720:fps=30")
+    elif move == "out":
+        zp = (f"zoompan=z='max(1.20-on*{step:.7f},1.0)':d=1:"
+              f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1280x720:fps=30")
+    elif move == "panr":
+        zp = (f"zoompan=z=1.15:d=1:x='(iw-iw/zoom)*on/{frames}':"
+              f"y='ih/2-(ih/zoom/2)':s=1280x720:fps=30")
+    else:  # panl
+        zp = (f"zoompan=z=1.15:d=1:x='(iw-iw/zoom)*(1-on/{frames})':"
+              f"y='ih/2-(ih/zoom/2)':s=1280x720:fps=30")
+    cmd = [FFMPEG,"-y","-loop","1","-i",src,"-t",f"{duration:.3f}",
+           "-vf",f"{base},{zp}",
+           "-r","30","-c:v","libx264","-preset","fast","-crf","23","-an", dst]
+    return subprocess.run(cmd, capture_output=True).returncode == 0
+
+
 def build_xfade_chain(seg_paths, output):
     """Chain all segments with slideleft xfade transitions."""
     n = len(seg_paths)
@@ -863,6 +959,7 @@ cum_t       = 0.0
 cta_inserted= set()
 source_counts = {}  # how many clips each source has contributed (for diversity)
 session_used  = set()  # clip IDs used in THIS build (saved to history at end)
+consecutive_images = 0  # running count of back-to-back Ken Burns image segments
 
 for i, clip in enumerate(CLIPS):
     desc    = clip["desc"]
@@ -965,6 +1062,40 @@ for i, clip in enumerate(CLIPS):
 
     # ── Step 2: best offset within clip ───────────────────────────────────
     best_t, best_s = best_offset(raw_p, desc, dur, actual_dur)
+
+    # ── Image fallback: no good video match → try a Ken Burns still ────────
+    # Only when the video score is poor AND we haven't already placed
+    # MAX_CONSECUTIVE_IMAGES stills in a row (continuity rule, avoids boredom).
+    if best_s < IMAGE_FALLBACK_THRESHOLD and consecutive_images < MAX_CONSECUTIVE_IMAGES:
+        img_cands = search_images(queries, top_n=12)
+        scored = []
+        for iurl, iid, ithumb in img_cands:
+            scored.append((clip_score_url(ithumb, desc) if ithumb else 0.0, iurl, iid))
+        scored.sort(reverse=True)
+        if scored and scored[0][0] > best_s:
+            img_s, img_url, img_id = scored[0]
+            img_raw = f"{IMGDIR}/i{i:04d}_{img_id}.jpg"
+            if download(img_url, img_raw) and make_image_segment(
+                    img_raw, seg_p, dur, scene_last=clip["scene_last"]):
+                if clip.get("cta_overlay"):
+                    cta_out = seg_p.replace(".mp4","_cta.mp4")
+                    if apply_cta_overlay(seg_p, cta_out, duration=dur):
+                        seg_p = cta_out
+                used_ids.add(img_id); session_used.add(img_id)
+                consecutive_images += 1
+                isrc = img_id.split("_")[0]
+                print(f"[{i:3d}] [IMG {isrc}] scene={clip['scene']:2d}  "
+                      f"{clip['start']:.1f}-{clip['end']:.1f}s  CLIP={img_s:.3f}  "
+                      f"Ken Burns ({consecutive_images}/{MAX_CONSECUTIVE_IMAGES})  {queries[0][:30]}")
+                timeline.append((seg_p, cum_t, cum_t+dur, clip["scene_last"], False))
+                cum_t += dur
+                seg_paths.append(seg_p); clip_scores.append(img_s)
+                source_counts[isrc] = source_counts.get(isrc, 0) + 1
+                time.sleep(0.15)
+                continue
+
+    # A video clip is being used → reset the consecutive-image streak.
+    consecutive_images = 0
 
     # Ken Burns disabled — zoompan freezes video clips on first frame
     kb = False
