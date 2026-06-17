@@ -404,7 +404,7 @@ def format_timestamp(seconds):
 
 def write_chapter_metadata(metadata_path, chapters):
     """Write ffmpeg-compatible chapter metadata file."""
-    with open(metadata_path, 'w') as f:
+    with open(metadata_path, 'w', encoding='utf-8') as f:
         f.write(';FFMETADATA1\n')
         for ch in chapters:
             start_ms = int(ch['start'] * 1000)
@@ -418,7 +418,7 @@ def write_chapter_metadata(metadata_path, chapters):
 
 def write_youtube_description(desc_path, chapters, total_duration):
     """Write a YouTube-ready description with chapter timestamps."""
-    with open(desc_path, 'w') as f:
+    with open(desc_path, 'w', encoding='utf-8') as f:
         f.write('🌊 Ocean Meditation — Relaxing Sea Footage with Binaural Beats\n\n')
         f.write(f'A {format_timestamp(total_duration)} meditation video featuring ')
         f.write('serene ocean footage with slow-motion, cinematic blue color grading, ')
