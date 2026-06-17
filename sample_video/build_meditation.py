@@ -5,7 +5,7 @@ import json, os, subprocess, sys, urllib.request, urllib.parse
 
 CLIP_DIR = os.path.join(os.path.dirname(__file__), 'clips')
 OUTPUT = os.path.join(os.path.dirname(__file__), 'meditation_sea_1min.mp4')
-TARGET_DURATION = 60
+TARGET_DURATION = 0  # 0 = use full clip lengths, no trimming
 
 PIXABAY_API_KEY = '47403938-c37e3c3a8f6b0c1b07f8a5b89'
 
@@ -91,44 +91,40 @@ def get_duration(path):
         return 0
 
 
-def build_video(clips, output, target_dur=60):
-    total_clips = len(clips)
-    segment_dur = target_dur / total_clips
-
-    trimmed = []
+def build_video(clips, output, target_dur=0):
+    prepared = []
     for i, clip_path in enumerate(clips):
         clip_dur = get_duration(clip_path)
         if clip_dur <= 0:
             continue
-        trim_to = min(segment_dur, clip_dur)
-        trimmed_path = os.path.join(CLIP_DIR, f'seg_{i:02d}.mp4')
+        prep_path = os.path.join(CLIP_DIR, f'seg_{i:02d}.mp4')
 
         fade_dur = 0.8
-        subprocess.run([
+        cmd = [
             'ffmpeg', '-y', '-i', clip_path,
-            '-t', str(trim_to),
             '-vf', (
                 f'scale=1920:1080:force_original_aspect_ratio=decrease,'
                 f'pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=30,'
-                f'fade=t=in:st=0:d={fade_dur},fade=t=out:st={max(0, trim_to - fade_dur)}:d={fade_dur}'
+                f'fade=t=in:st=0:d={fade_dur},fade=t=out:st={max(0, clip_dur - fade_dur)}:d={fade_dur}'
             ),
             '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
             '-an', '-movflags', '+faststart',
-            trimmed_path
-        ], capture_output=True)
+            prep_path
+        ]
+        subprocess.run(cmd, capture_output=True)
 
-        if os.path.exists(trimmed_path) and os.path.getsize(trimmed_path) > 1000:
-            actual_dur = get_duration(trimmed_path)
-            trimmed.append(trimmed_path)
-            print(f"  [TRIM] seg_{i:02d}.mp4  ({actual_dur:.1f}s)")
+        if os.path.exists(prep_path) and os.path.getsize(prep_path) > 1000:
+            actual_dur = get_duration(prep_path)
+            prepared.append(prep_path)
+            print(f"  [PREP] seg_{i:02d}.mp4  ({actual_dur:.1f}s — full length)")
 
-    if not trimmed:
-        print("[ERR] No trimmed segments produced.")
+    if not prepared:
+        print("[ERR] No segments produced.")
         return False
 
     concat_list = os.path.join(CLIP_DIR, 'concat.txt')
     with open(concat_list, 'w') as f:
-        for t in trimmed:
+        for t in prepared:
             f.write(f"file '{os.path.abspath(t)}'\n")
 
     subprocess.run([
@@ -138,7 +134,7 @@ def build_video(clips, output, target_dur=60):
         output
     ], capture_output=True)
 
-    for t in trimmed:
+    for t in prepared:
         os.remove(t)
     os.remove(concat_list)
 
@@ -174,8 +170,8 @@ def main():
         print("[ERR] Not enough clips. Check network access.")
         sys.exit(1)
 
-    print("[BUILD] Assembling 1-minute meditation video...\n")
-    ok = build_video(all_clips, OUTPUT, TARGET_DURATION)
+    print("[BUILD] Assembling meditation video (full-length clips)...\n")
+    ok = build_video(all_clips, OUTPUT)
     if not ok:
         print("[ERR] Video build failed.")
         sys.exit(1)
