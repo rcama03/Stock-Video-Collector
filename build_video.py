@@ -20,8 +20,8 @@ import numpy as np
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 FFMPEG   = "/usr/local/lib/python3.11/dist-packages/imageio_ffmpeg/binaries/ffmpeg-linux-x86_64-v7.0.2"
-AUDIO    = sys.argv[1] if len(sys.argv) > 1 else "/root/.claude/uploads/c6774b2d-5668-54de-9a4f-188c80ca845c/d62af752-full_voiceover.mp3"
-OUTPUT   = sys.argv[2] if len(sys.argv) > 2 else "/home/user/Stock-Video-Collector/wm2026_kabinenpersonal_v2_video.mp4"
+AUDIO    = sys.argv[1] if len(sys.argv) > 1 else "/root/.claude/uploads/c6774b2d-5668-54de-9a4f-188c80ca845c/bb4a8f28-full_voiceover.mp3"
+OUTPUT   = sys.argv[2] if len(sys.argv) > 2 else "/home/user/Stock-Video-Collector/wm2026_flughafenscanner_video.mp4"
 WORK     = "/tmp/vbuild"
 RAWDIR   = f"{WORK}/raw"
 SEGDIR   = f"{WORK}/seg"
@@ -813,10 +813,14 @@ else:
 
 scene_starts = []
 t = 0.0
+# Inflate total to compensate for xfade duration loss between scenes
+xfade_loss = (len(SCENE_WORDS) - 1) * XFADE_DURATION
+INFLATED_DUR = TOTAL_DUR + xfade_loss
+RATE_INF = INFLATED_DUR / max(sum(SCENE_WORDS), 1)
 for w in SCENE_WORDS:
     scene_starts.append(round(t, 2))
-    t += w * RATE
-scene_ends = scene_starts[1:] + [round(TOTAL_DUR, 2)]
+    t += w * RATE_INF
+scene_ends = scene_starts[1:] + [round(INFLATED_DUR, 2)]
 
 # ── Build clip list (4-7s sub-clips per scene) ────────────────────────────────
 CLIPS = []
@@ -1108,11 +1112,12 @@ else:
 print(f"Muxing → {OUTPUT}")
 audio_dur = get_dur(AUDIO)
 fade_out_start = max(0, audio_dur - 1.5)
+# If video shorter than audio, freeze last frame to fill the gap
+vfilt = f"[0:v]tpad=stop_mode=clone:stop_duration={max(0, audio_dur - vid_dur + 2):.3f},trim=end={audio_dur:.3f},setpts=PTS-STARTPTS,fade=out:st={fade_out_start:.3f}:d=1.5[vout]"
 r = subprocess.run([FFMPEG,"-y",
                     "-i", combined, "-i", mixed,
                     "-filter_complex",
-                    (f"[0:v]trim=end={audio_dur:.3f},setpts=PTS-STARTPTS,"
-                     f"fade=out:st={fade_out_start:.3f}:d=1.5[vout];"
+                    (f"{vfilt};"
                      f"[1:a]afade=t=out:st={fade_out_start:.3f}:d=1.5[aout]"),
                     "-map","[vout]","-map","[aout]",
                     "-c:v","libx264","-preset","fast","-crf","21",
