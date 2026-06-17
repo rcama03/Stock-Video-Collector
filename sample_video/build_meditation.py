@@ -40,20 +40,20 @@ MUSIC_FADE_OUT = 5.0  # music fade out duration at end
 BINAURAL_FREQ = 528   # healing frequency in Hz (528=love/DNA repair, 432=calm, 396=liberation)
 BINAURAL_VOLUME = 0.03  # subtle — should be felt, not heard prominently
 
-# ── Search queries — nature/ocean only, no people ───────────────────────
+# ── Search queries — pure nature/ocean, terms that naturally exclude humans ──
 SEARCH_QUERIES = [
-    'ocean waves nature -people -person -face -woman -man',
-    'sea sunset aerial -people -person -face',
-    'underwater coral reef -people -diver -person',
-    'beach waves drone -people -person -crowd',
-    'ocean horizon sunrise -people -person',
-    'calm sea surface -people -person -boat',
-    'tropical lagoon blue water -people -person',
-    'sea turtle underwater -people -person',
-    'ocean jellyfish deep sea -people -person',
-    'seashore rocks waves -people -person',
-    'bioluminescent ocean night -people -person',
-    'kelp forest underwater -people -person',
+    'aerial ocean waves drone',
+    'underwater coral reef close up',
+    'waves crashing rocks slow motion',
+    'ocean surface ripples sunlight',
+    'deep sea jellyfish',
+    'tropical fish reef',
+    'sea turtle swimming underwater',
+    'ocean drone top down',
+    'kelp forest underwater',
+    'starfish seabed ocean floor',
+    'bioluminescent plankton ocean',
+    'wave rolling barrel close up',
 ]
 
 # Clean queries for APIs that don't support minus syntax
@@ -85,7 +85,7 @@ def search_pexels(query, per_page=5):
                         break
                 if not best:
                     for f in sorted(v.get('video_files', []), key=lambda x: x.get('width', 0), reverse=True):
-                        if f.get('width', 0) >= 1080:
+                        if f.get('width', 0) >= 720:
                             best = f
                             break
                 if best and best.get('link'):
@@ -110,7 +110,7 @@ def search_pixabay(query, per_page=5):
     params = urllib.parse.urlencode({
         'key': PIXABAY_API_KEY, 'q': q, 'video_type': 'film',
         'per_page': per_page, 'safesearch': 'true', 'order': 'popular',
-        'min_width': 1920,
+        'min_width': 1280,
     })
     url = f'https://pixabay.com/api/videos/?{params}'
     req = urllib.request.Request(url, headers=HEADERS)
@@ -123,7 +123,7 @@ def search_pixabay(query, per_page=5):
                 chosen = vids.get('large', {})
                 if not chosen.get('url'):
                     chosen = vids.get('medium', {})
-                if chosen.get('url') and chosen.get('width', 0) >= 1080:
+                if chosen.get('url') and chosen.get('width', 0) >= 720:
                     results.append({
                         'url': chosen['url'],
                         'id': f"pixabay_{hit.get('id', '')}",
@@ -326,67 +326,106 @@ def get_resolution(path):
 # ── Generate meditation music using ffmpeg (sine wave ambient pad) ─────
 
 def generate_ambient_music(output_path, duration):
-    """Generate ambient pad + binaural beats using layered sine waves."""
+    """Generate ambient pad + binaural beats. Uses a simplified, reliable filter chain."""
     print(f"  [MUSIC] Generating {duration:.0f}s ambient track + {BINAURAL_FREQ}Hz binaural beats...")
 
-    # Binaural beats: two slightly offset frequencies create a perceived
-    # beating tone when listened to with headphones. E.g. 528Hz left ear,
-    # 536Hz right ear → brain perceives 8Hz theta wave (deep relaxation).
     binaural_offset = 8  # 8Hz theta wave for deep meditation
     freq_left = BINAURAL_FREQ
     freq_right = BINAURAL_FREQ + binaural_offset
+    fade_out_start = max(0, duration - MUSIC_FADE_OUT)
 
-    filter_complex = (
-        # Base drone (deep low frequency)
-        f'sine=frequency=80:duration={duration}:sample_rate=44100[drone];'
-        f'sine=frequency=120:duration={duration}:sample_rate=44100[drone2];'
-        # Mid harmonic layer
-        f'sine=frequency=174:duration={duration}:sample_rate=44100[mid1];'
-        f'sine=frequency=261:duration={duration}:sample_rate=44100[mid2];'
-        # High shimmer
-        f'sine=frequency=396:duration={duration}:sample_rate=44100[high1];'
-        f'sine=frequency=528:duration={duration}:sample_rate=44100[high2];'
-        # Binaural beats — left and right ear at slightly different frequencies
-        f'sine=frequency={freq_left}:duration={duration}:sample_rate=44100[bin_l];'
-        f'sine=frequency={freq_right}:duration={duration}:sample_rate=44100[bin_r];'
-        # Volume levels
-        '[drone]volume=0.15[dv];'
-        '[drone2]volume=0.12[d2v];'
-        '[mid1]volume=0.08[m1v];'
-        '[mid2]volume=0.06[m2v];'
-        '[high1]volume=0.04[h1v];'
-        '[high2]volume=0.03[h2v];'
-        f'[bin_l]volume={BINAURAL_VOLUME}[blv];'
-        f'[bin_r]volume={BINAURAL_VOLUME}[brv];'
-        # Combine ambient layers (mono)
-        '[dv][d2v][m1v][m2v][h1v][h2v]amix=inputs=6:duration=longest[ambient];'
-        # Apply reverb-like effect
-        f'[ambient]aecho=0.8:0.7:40|80|120:0.3|0.2|0.1[reverbed];'
-        # Split ambient to stereo
-        '[reverbed]asplit=2[amb_l][amb_r];'
-        # Mix binaural into left/right channels separately
-        '[amb_l][blv]amix=inputs=2:duration=longest[left];'
-        '[amb_r][brv]amix=inputs=2:duration=longest[right];'
-        # Merge into stereo
-        '[left][right]join=inputs=2:channel_layout=stereo[stereo];'
-        # Fade in and fade out
-        f'[stereo]afade=t=in:st=0:d={MUSIC_FADE_IN},'
-        f'afade=t=out:st={duration - MUSIC_FADE_OUT}:d={MUSIC_FADE_OUT}[out]'
+    # Step 1: Generate ambient drone (mono)
+    ambient_path = output_path + '.ambient.wav'
+    ambient_filter = (
+        f'sine=f=80:d={duration}:sample_rate=44100[a];'
+        f'sine=f=120:d={duration}:sample_rate=44100[b];'
+        f'sine=f=174:d={duration}:sample_rate=44100[c];'
+        f'sine=f=261:d={duration}:sample_rate=44100[d];'
+        f'sine=f=396:d={duration}:sample_rate=44100[e];'
+        '[a]volume=0.15[av];[b]volume=0.12[bv];'
+        '[c]volume=0.08[cv];[d]volume=0.06[dv];'
+        '[e]volume=0.04[ev];'
+        '[av][bv][cv][dv][ev]amix=inputs=5:duration=longest,'
+        f'aecho=0.8:0.7:40|80:0.3|0.2,'
+        f'afade=t=in:st=0:d={MUSIC_FADE_IN},'
+        f'afade=t=out:st={fade_out_start}:d={MUSIC_FADE_OUT}[out]'
     )
+    r1 = subprocess.run([
+        'ffmpeg', '-y', '-filter_complex', ambient_filter,
+        '-map', '[out]', ambient_path
+    ], capture_output=True, text=True)
+
+    if not os.path.exists(ambient_path):
+        print(f"  [MUSIC] ERROR: Ambient generation failed")
+        if r1.stderr:
+            print(f"          ffmpeg: {r1.stderr[-300:]}")
+        return False
+
+    # Step 2: Generate binaural beats (left channel + right channel separately)
+    bin_left_path = output_path + '.binL.wav'
+    bin_right_path = output_path + '.binR.wav'
 
     subprocess.run([
+        'ffmpeg', '-y', '-filter_complex',
+        f'sine=f={freq_left}:d={duration}:sample_rate=44100,volume={BINAURAL_VOLUME},'
+        f'afade=t=in:st=0:d={MUSIC_FADE_IN},'
+        f'afade=t=out:st={fade_out_start}:d={MUSIC_FADE_OUT}[out]',
+        '-map', '[out]', bin_left_path
+    ], capture_output=True)
+
+    subprocess.run([
+        'ffmpeg', '-y', '-filter_complex',
+        f'sine=f={freq_right}:d={duration}:sample_rate=44100,volume={BINAURAL_VOLUME},'
+        f'afade=t=in:st=0:d={MUSIC_FADE_IN},'
+        f'afade=t=out:st={fade_out_start}:d={MUSIC_FADE_OUT}[out]',
+        '-map', '[out]', bin_right_path
+    ], capture_output=True)
+
+    # Step 3: Merge ambient (both channels) + binaural left + binaural right into stereo
+    r3 = subprocess.run([
         'ffmpeg', '-y',
-        '-filter_complex', filter_complex,
+        '-i', ambient_path,
+        '-i', bin_left_path,
+        '-i', bin_right_path,
+        '-filter_complex',
+        '[0:a]asplit=2[amb_l][amb_r];'
+        '[amb_l][1:a]amix=inputs=2:duration=longest[left];'
+        '[amb_r][2:a]amix=inputs=2:duration=longest[right];'
+        '[left][right]join=inputs=2:channel_layout=stereo[out]',
         '-map', '[out]',
         '-c:a', 'aac', '-b:a', '192k',
         output_path
-    ], capture_output=True)
+    ], capture_output=True, text=True)
+
+    # Clean temp files
+    for tmp in [ambient_path, bin_left_path, bin_right_path]:
+        if os.path.exists(tmp):
+            os.remove(tmp)
 
     if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
         print(f"  [MUSIC] Generated: {os.path.basename(output_path)}")
-        print(f"          Binaural: {freq_left}Hz (L) + {freq_right}Hz (R) → {binaural_offset}Hz theta wave")
+        print(f"          Binaural: {freq_left}Hz (L) + {freq_right}Hz (R) = {binaural_offset}Hz theta wave")
         return True
-    print("  [MUSIC] WARNING: Music generation failed, video will be silent")
+
+    print(f"  [MUSIC] ERROR: Final mix failed")
+    if r3.stderr:
+        print(f"          ffmpeg: {r3.stderr[-300:]}")
+
+    # Step 4: Fallback — just use the ambient mono track if stereo mix failed
+    print("  [MUSIC] Trying fallback: ambient-only (no binaural)...")
+    # Regenerate ambient since we deleted it
+    r4 = subprocess.run([
+        'ffmpeg', '-y', '-filter_complex', ambient_filter,
+        '-map', '[out]', '-c:a', 'aac', '-b:a', '192k', output_path
+    ], capture_output=True, text=True)
+
+    if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+        print(f"  [MUSIC] Fallback OK: ambient-only (no binaural beats)")
+        return True
+
+    print(f"  [MUSIC] ERROR: All music generation failed — video will be silent")
+    if r4.stderr:
+        print(f"          ffmpeg: {r4.stderr[-300:]}")
     return False
 
 
@@ -654,10 +693,28 @@ def build_video(clips, output, clip_labels=None):
     if os.path.exists(output):
         dur = get_duration(output)
         size_mb = os.path.getsize(output) / (1024 * 1024)
+
+        # Verify audio stream exists in final output
+        has_audio = False
+        try:
+            probe = subprocess.check_output([
+                'ffprobe', '-v', 'quiet', '-print_format', 'json',
+                '-show_streams', output
+            ], text=True)
+            for s in json.loads(probe).get('streams', []):
+                if s.get('codec_type') == 'audio':
+                    has_audio = True
+                    break
+        except Exception:
+            pass
+
         print(f"\n  [DONE] {output}")
         print(f"         Duration: {dur:.1f}s | Size: {size_mb:.1f} MB | 1920x1080 | 30fps")
         print(f"         Effects: {SLOWMO_FACTOR}x slow-mo, blue/teal grade, {CROSSFADE_DUR}s crossfades")
-        print(f"         Audio: Ambient pad + {BINAURAL_FREQ}Hz binaural beats")
+        if has_audio:
+            print(f"         Audio: Ambient pad + {BINAURAL_FREQ}Hz binaural beats [OK]")
+        else:
+            print(f"         Audio: WARNING — no audio stream detected! Music mixing may have failed.")
         print(f"         Chapters: {len(chapters)} markers embedded")
         print(f"         YouTube: {desc_path}")
 
@@ -716,7 +773,7 @@ def main():
             clip_path = os.path.join(CLIP_DIR, f"{v['id']}.mp4")
             if download_clip(v['url'], clip_path):
                 w, h = get_resolution(clip_path)
-                if w < 1080 and h < 1080:
+                if w < 720 and h < 720:
                     print(f"    [SKIP] {v['id']} — resolution too low ({w}x{h})")
                     os.remove(clip_path)
                     continue
