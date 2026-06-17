@@ -1066,7 +1066,11 @@ for i, clip in enumerate(CLIPS):
     # ── Image fallback: no good video match → try a Ken Burns still ────────
     # Only when the video score is poor AND we haven't already placed
     # MAX_CONSECUTIVE_IMAGES stills in a row (continuity rule, avoids boredom).
-    if best_s < IMAGE_FALLBACK_THRESHOLD and consecutive_images < MAX_CONSECUTIVE_IMAGES:
+    is_first_clip = (i == 0)
+    is_last_clip  = (i == len(CLIPS) - 1)
+    if (best_s < IMAGE_FALLBACK_THRESHOLD
+            and consecutive_images < MAX_CONSECUTIVE_IMAGES
+            and not is_first_clip and not is_last_clip):
         img_cands = search_images(queries, top_n=12)
         scored = []
         for iurl, iid, ithumb in img_cands:
