@@ -37,6 +37,8 @@ SLOWMO_FACTOR = 0.7   # slow motion speed (0.7 = 70% speed, dreamy)
 CROSSFADE_DUR = 1.5   # crossfade duration between clips in seconds
 MUSIC_FADE_IN = 4.0   # music fade in duration at start
 MUSIC_FADE_OUT = 5.0  # music fade out duration at end
+BINAURAL_FREQ = 528   # healing frequency in Hz (528=love/DNA repair, 432=calm, 396=liberation)
+BINAURAL_VOLUME = 0.03  # subtle — should be felt, not heard prominently
 
 # ── Search queries — nature/ocean only, no people ───────────────────────
 SEARCH_QUERIES = [
@@ -324,11 +326,16 @@ def get_resolution(path):
 # ── Generate meditation music using ffmpeg (sine wave ambient pad) ─────
 
 def generate_ambient_music(output_path, duration):
-    """Generate a soothing ambient drone/pad using layered sine waves."""
-    print(f"  [MUSIC] Generating {duration:.0f}s ambient meditation track...")
+    """Generate ambient pad + binaural beats using layered sine waves."""
+    print(f"  [MUSIC] Generating {duration:.0f}s ambient track + {BINAURAL_FREQ}Hz binaural beats...")
 
-    # Layer multiple sine waves for a rich ambient pad
-    # Low drone + mid harmonics + high shimmer
+    # Binaural beats: two slightly offset frequencies create a perceived
+    # beating tone when listened to with headphones. E.g. 528Hz left ear,
+    # 536Hz right ear → brain perceives 8Hz theta wave (deep relaxation).
+    binaural_offset = 8  # 8Hz theta wave for deep meditation
+    freq_left = BINAURAL_FREQ
+    freq_right = BINAURAL_FREQ + binaural_offset
+
     filter_complex = (
         # Base drone (deep low frequency)
         f'sine=frequency=80:duration={duration}:sample_rate=44100[drone];'
@@ -339,19 +346,31 @@ def generate_ambient_music(output_path, duration):
         # High shimmer
         f'sine=frequency=396:duration={duration}:sample_rate=44100[high1];'
         f'sine=frequency=528:duration={duration}:sample_rate=44100[high2];'
-        # Mix layers with different volumes
+        # Binaural beats — left and right ear at slightly different frequencies
+        f'sine=frequency={freq_left}:duration={duration}:sample_rate=44100[bin_l];'
+        f'sine=frequency={freq_right}:duration={duration}:sample_rate=44100[bin_r];'
+        # Volume levels
         '[drone]volume=0.15[dv];'
         '[drone2]volume=0.12[d2v];'
         '[mid1]volume=0.08[m1v];'
         '[mid2]volume=0.06[m2v];'
         '[high1]volume=0.04[h1v];'
         '[high2]volume=0.03[h2v];'
-        # Combine all layers
-        '[dv][d2v][m1v][m2v][h1v][h2v]amix=inputs=6:duration=longest[mixed];'
-        # Apply reverb-like effect with delays for spaciousness
-        f'[mixed]aecho=0.8:0.7:40|80|120:0.3|0.2|0.1[reverbed];'
+        f'[bin_l]volume={BINAURAL_VOLUME}[blv];'
+        f'[bin_r]volume={BINAURAL_VOLUME}[brv];'
+        # Combine ambient layers (mono)
+        '[dv][d2v][m1v][m2v][h1v][h2v]amix=inputs=6:duration=longest[ambient];'
+        # Apply reverb-like effect
+        f'[ambient]aecho=0.8:0.7:40|80|120:0.3|0.2|0.1[reverbed];'
+        # Split ambient to stereo
+        '[reverbed]asplit=2[amb_l][amb_r];'
+        # Mix binaural into left/right channels separately
+        '[amb_l][blv]amix=inputs=2:duration=longest[left];'
+        '[amb_r][brv]amix=inputs=2:duration=longest[right];'
+        # Merge into stereo
+        '[left][right]join=inputs=2:channel_layout=stereo[stereo];'
         # Fade in and fade out
-        f'[reverbed]afade=t=in:st=0:d={MUSIC_FADE_IN},'
+        f'[stereo]afade=t=in:st=0:d={MUSIC_FADE_IN},'
         f'afade=t=out:st={duration - MUSIC_FADE_OUT}:d={MUSIC_FADE_OUT}[out]'
     )
 
@@ -365,6 +384,7 @@ def generate_ambient_music(output_path, duration):
 
     if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
         print(f"  [MUSIC] Generated: {os.path.basename(output_path)}")
+        print(f"          Binaural: {freq_left}Hz (L) + {freq_right}Hz (R) → {binaural_offset}Hz theta wave")
         return True
     print("  [MUSIC] WARNING: Music generation failed, video will be silent")
     return False
@@ -372,22 +392,68 @@ def generate_ambient_music(output_path, duration):
 
 # ── Video Assembly ─────────────────────────────────────────────────────
 
-def build_video(clips, output):
+def format_timestamp(seconds):
+    """Format seconds as HH:MM:SS or MM:SS for chapter markers."""
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    if h > 0:
+        return f'{h}:{m:02d}:{s:02d}'
+    return f'{m}:{s:02d}'
+
+
+def write_chapter_metadata(metadata_path, chapters):
+    """Write ffmpeg-compatible chapter metadata file."""
+    with open(metadata_path, 'w') as f:
+        f.write(';FFMETADATA1\n')
+        for ch in chapters:
+            start_ms = int(ch['start'] * 1000)
+            end_ms = int(ch['end'] * 1000)
+            f.write('\n[CHAPTER]\n')
+            f.write('TIMEBASE=1/1000\n')
+            f.write(f'START={start_ms}\n')
+            f.write(f'END={end_ms}\n')
+            f.write(f'title={ch["title"]}\n')
+
+
+def write_youtube_description(desc_path, chapters, total_duration):
+    """Write a YouTube-ready description with chapter timestamps."""
+    with open(desc_path, 'w') as f:
+        f.write('🌊 Ocean Meditation — Relaxing Sea Footage with Binaural Beats\n\n')
+        f.write(f'A {format_timestamp(total_duration)} meditation video featuring ')
+        f.write('serene ocean footage with slow-motion, cinematic blue color grading, ')
+        f.write(f'and {BINAURAL_FREQ}Hz binaural beats for deep relaxation.\n\n')
+        f.write('🎧 Best experienced with headphones for binaural beat effect.\n\n')
+        f.write('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n')
+        f.write('📑 Chapters:\n')
+        for ch in chapters:
+            f.write(f'{format_timestamp(ch["start"])} — {ch["title"]}\n')
+        f.write('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n')
+        f.write('#meditation #ocean #relaxing #binauralbeats #deepsleep #calm\n')
+    print(f"  [CHAPTERS] YouTube description: {os.path.basename(desc_path)}")
+
+
+def build_video(clips, output, clip_labels=None):
     """
     Build meditation video with:
     - 12-15s trim per clip
     - 0.7x slow motion
     - Blue/teal color grading
     - Crossfade transitions
-    - Ambient music with fade in/out
+    - Ambient music with binaural beats and fade in/out
+    - YouTube chapter markers embedded in MP4
     - Cleanup after assembly
     """
     if not clips:
         print("[ERR] No clips to build.")
         return False
 
+    if not clip_labels:
+        clip_labels = [f'Scene {i+1}' for i in range(len(clips))]
+
     # Step 1: Prepare each clip (trim, slow-mo, color grade, scale)
     prepared = []
+    prep_labels = []
     for i, clip_path in enumerate(clips):
         clip_dur = get_duration(clip_path)
         if clip_dur <= 0:
@@ -433,6 +499,7 @@ def build_video(clips, output):
         if os.path.exists(prep_path) and os.path.getsize(prep_path) > 1000:
             actual_dur = get_duration(prep_path)
             prepared.append(prep_path)
+            prep_labels.append(clip_labels[i] if i < len(clip_labels) else f'Scene {i+1}')
             print(f"  [PREP] seg_{i:02d}.mp4  ({actual_dur:.1f}s with slow-mo + color grade)")
 
     if len(prepared) < 2:
@@ -519,17 +586,43 @@ def build_video(clips, output):
     video_dur = get_duration(xfade_output)
     print(f"  [XFADE] Crossfaded video: {video_dur:.1f}s")
 
-    # Step 3: Generate ambient meditation music
+    # Step 3: Build chapter markers from segment durations
+    chapters = []
+    chapter_start = 0.0
+    for i, dur_s in enumerate(durations):
+        label = prep_labels[i] if i < len(prep_labels) else f'Scene {i+1}'
+        if i > 0:
+            chapter_start = chapter_start + durations[i-1] - CROSSFADE_DUR
+        chapter_end = chapter_start + dur_s - (CROSSFADE_DUR if i < len(durations) - 1 else 0)
+        chapters.append({
+            'start': max(0, chapter_start),
+            'end': min(video_dur, chapter_end),
+            'title': label,
+        })
+
+    # Write ffmpeg chapter metadata file
+    metadata_path = os.path.join(CLIP_DIR, 'chapters.txt')
+    write_chapter_metadata(metadata_path, chapters)
+    print(f"  [CHAPTERS] {len(chapters)} chapter markers created")
+
+    # Write YouTube description with timestamps
+    desc_path = os.path.join(SCRIPT_DIR, 'youtube_description.txt')
+    write_youtube_description(desc_path, chapters, video_dur)
+
+    # Step 4: Generate ambient meditation music + binaural beats
     music_path = os.path.join(CLIP_DIR, 'ambient_music.m4a')
     has_music = generate_ambient_music(music_path, video_dur)
 
-    # Step 4: Combine video + music
+    # Step 5: Combine video + music + chapter metadata
     if has_music:
-        print("  [MIX] Combining video with meditation music...")
+        print("  [MIX] Combining video + music + chapters...")
         subprocess.run([
             'ffmpeg', '-y',
             '-i', xfade_output,
             '-i', music_path,
+            '-i', metadata_path,
+            '-map_metadata', '2',
+            '-map', '0:v', '-map', '1:a',
             '-c:v', 'copy',
             '-c:a', 'aac', '-b:a', '192k',
             '-shortest',
@@ -539,7 +632,24 @@ def build_video(clips, output):
         os.remove(music_path)
         os.remove(xfade_output)
     else:
-        os.rename(xfade_output, output)
+        # No music — still embed chapters
+        temp_out = os.path.join(CLIP_DIR, 'temp_chapters.mp4')
+        subprocess.run([
+            'ffmpeg', '-y',
+            '-i', xfade_output,
+            '-i', metadata_path,
+            '-map_metadata', '1',
+            '-map', '0:v',
+            '-c:v', 'copy',
+            '-movflags', '+faststart',
+            temp_out
+        ], capture_output=True)
+        if os.path.exists(temp_out):
+            os.rename(temp_out, output)
+            os.remove(xfade_output)
+        else:
+            os.rename(xfade_output, output)
+    os.remove(metadata_path)
 
     if os.path.exists(output):
         dur = get_duration(output)
@@ -547,6 +657,9 @@ def build_video(clips, output):
         print(f"\n  [DONE] {output}")
         print(f"         Duration: {dur:.1f}s | Size: {size_mb:.1f} MB | 1920x1080 | 30fps")
         print(f"         Effects: {SLOWMO_FACTOR}x slow-mo, blue/teal grade, {CROSSFADE_DUR}s crossfades")
+        print(f"         Audio: Ambient pad + {BINAURAL_FREQ}Hz binaural beats")
+        print(f"         Chapters: {len(chapters)} markers embedded")
+        print(f"         YouTube: {desc_path}")
 
         # Clean up original downloaded clips
         for c in clips:
@@ -578,7 +691,8 @@ def main():
     print(f"  Slow-mo:    {SLOWMO_FACTOR}x speed")
     print(f"  Color:      Blue/teal cinematic grade")
     print(f"  Transitions: {CROSSFADE_DUR}s crossfades")
-    print(f"  Music:      Ambient meditation (generated)")
+    print(f"  Music:      Ambient meditation + {BINAURAL_FREQ}Hz binaural beats")
+    print(f"  Chapters:   Auto-generated (embedded + YouTube description)")
     print(f"  Faces:      Excluded from search")
     if not PEXELS_API_KEY:
         print("  [INFO] Pexels skipped — set PEXELS_API_KEY (free at pexels.com/api/)")
@@ -588,6 +702,7 @@ def main():
     print()
 
     all_clips = []
+    clip_labels = []  # human-readable label per clip (for chapter markers)
     used_ids = set()
 
     for query in SEARCH_QUERIES:
@@ -606,6 +721,7 @@ def main():
                     os.remove(clip_path)
                     continue
                 all_clips.append(clip_path)
+                clip_labels.append(display_q.title())
                 used_ids.add(v['id'])
                 print(f"    [OK] {v['source']}: {v['id']} ({w}x{h})")
                 break
@@ -622,7 +738,7 @@ def main():
         sys.exit(1)
 
     print("[BUILD] Assembling meditation video...\n")
-    ok = build_video(all_clips, OUTPUT)
+    ok = build_video(all_clips, OUTPUT, clip_labels=clip_labels)
     if not ok:
         print("[ERR] Video build failed.")
         sys.exit(1)
