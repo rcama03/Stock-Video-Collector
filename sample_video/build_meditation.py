@@ -324,6 +324,15 @@ def build_video(clips, output):
         size_mb = os.path.getsize(output) / (1024 * 1024)
         print(f"\n  [DONE] {output}")
         print(f"         Duration: {dur:.1f}s | Size: {size_mb:.1f} MB | Resolution: 1920x1080")
+
+        # Clean up original downloaded clips
+        for c in clips:
+            if os.path.exists(c):
+                os.remove(c)
+        if os.path.isdir(CLIP_DIR) and not os.listdir(CLIP_DIR):
+            os.rmdir(CLIP_DIR)
+        print("  [CLEANUP] Removed all source clips")
+
         return True
     return False
 
