@@ -1147,14 +1147,38 @@ for i, clip in enumerate(CLIPS):
                             cum_t += BROLL_DURATION
                             print(f"  [B-roll: {broll_queries[0][:40]}]")
     else:
-        print(f"  encode failed — filling with black frame")
-        subprocess.run([FFMPEG,"-y","-f","lavfi",
-                        "-i",f"color=black:size=1280x720:rate=30:duration={dur:.3f}",
-                        "-c:v","libx264","-preset","fast","-an", seg_p],
-                       capture_output=True)
-        timeline.append((seg_p, cum_t, cum_t+dur, clip["scene_last"], False))
-        cum_t += dur
-        seg_paths.append(seg_p); clip_scores.append(0)
+        # Encode failed — try remaining candidates before falling to black
+        print(f"  encode failed — trying alternatives…")
+        _alt_ok = False
+        _remaining = [c for c in candidates if c[1] != vid and c[1] not in used_ids]
+        for _aurl, _avid, _adur, *_ in _remaining[:5]:
+            _araw = f"{RAWDIR}/r{i:04d}_{_avid}.mp4"
+            if download(_aurl, _araw):
+                _adur_actual = get_dur(_araw) or _adur
+                _at, _as = best_offset(_araw, desc, dur, _adur_actual)
+                if make_seg(_araw, seg_p, dur, start_offset=_at, scene_last=clip["scene_last"]):
+                    used_ids.add(_avid); session_used.add(_avid)
+                    _atag = _avid.split("_")[0] if "_" in _avid else "?"
+                    print(f"  → recovered with {_avid} (CLIP={_as:.3f})")
+                    if clip.get("cta_overlay"):
+                        cta_out = seg_p.replace(".mp4","_cta.mp4")
+                        if apply_cta_overlay(seg_p, cta_out, duration=dur):
+                            seg_p = cta_out
+                    timeline.append((seg_p, cum_t, cum_t+dur, clip["scene_last"], False))
+                    cum_t += dur
+                    seg_paths.append(seg_p); clip_scores.append(_as)
+                    source_counts[_atag] = source_counts.get(_atag, 0) + 1
+                    _alt_ok = True
+                    break
+        if not _alt_ok:
+            print(f"  all alternatives failed — filling with black frame")
+            subprocess.run([FFMPEG,"-y","-f","lavfi",
+                            "-i",f"color=black:size=1280x720:rate=30:duration={dur:.3f}",
+                            "-c:v","libx264","-preset","fast","-an", seg_p],
+                           capture_output=True)
+            timeline.append((seg_p, cum_t, cum_t+dur, clip["scene_last"], False))
+            cum_t += dur
+            seg_paths.append(seg_p); clip_scores.append(0)
 
     time.sleep(0.15)
 
