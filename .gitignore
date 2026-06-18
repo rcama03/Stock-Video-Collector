@@ -17,3 +17,5 @@ api_keys.env
 used_clip_ids.json
 .used_clips.json
 sample_*.mp4
+demo_effects.py
+demo_effects_video.mp4
