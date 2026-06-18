@@ -814,15 +814,15 @@ def generate_scene_queries(scene_text, is_english=False):
             prompt = f"""You are a stock video researcher for an AVIATION/TRAVEL YouTube channel. This is a scene from a video:
 "{scene_text[:300]}"
 
-CRITICAL: This channel is aviation/travel niche. ALL queries MUST be set in an airport, airplane, flight, or travel context. Even if the scene discusses laws, documents, finances, or emotions — the visual must show that in an AIRPORT or TRAVEL setting (e.g. "officer questioning traveler at airport booth", NOT "person at desk"). Every query should include at least one aviation/travel keyword (airport, terminal, gate, customs, boarding, flight, passport control, luggage, airline, etc.).
+PRIORITY: This channel is aviation/travel niche. Queries should be grounded in airport, airplane, flight, or travel settings FIRST. Use keywords like airport, terminal, gate, customs, boarding, flight, passport control, luggage, airline, check-in, security checkpoint, etc.
 
 Generate:
-1. One short visual description (max 8 words) of the ideal stock clip — specific and set in an airport/travel context
-2. Four search queries (max 6 words each): make each one different in angle, but ALL grounded in aviation/travel:
-   - q1: the specific action happening IN an airport/travel setting
-   - q2: the emotion or human element AT an airport/in transit
-   - q3: a broader aviation/travel context (security, customs, boarding, etc.)
-   - q4: a creative alternative still set in the aviation/travel world
+1. One short visual description (max 8 words) of the ideal stock clip — set in an airport/travel context
+2. Four search queries (max 6 words each):
+   - q1: the specific action in an airport/aviation setting
+   - q2: airport/travel setting with the emotion or human element
+   - q3: broader airport/aviation/travel context (security, customs, boarding, etc.)
+   - q4: a general broad fallback query WITHOUT aviation keywords (in case no aviation clips are found)
 
 Reply in EXACTLY this format:
 <desc>visual description here</desc>
@@ -834,15 +834,15 @@ Reply in EXACTLY this format:
             prompt = f"""You are a stock video researcher for an AVIATION/TRAVEL YouTube channel. This is a scene from a German video voiceover:
 "{scene_text[:300]}"
 
-CRITICAL: This channel is aviation/travel niche. ALL queries MUST be set in an airport, airplane, flight, or travel context. Even if the scene discusses laws, documents, finances, or emotions — the visual must show that in an AIRPORT or TRAVEL setting (e.g. "airport customs officer checking passport", NOT "person reading documents"). Every query should include at least one aviation/travel keyword (airport, terminal, gate, customs, boarding, flight, passport control, luggage, airline, etc.).
+PRIORITY: This channel is aviation/travel niche. Queries should be grounded in airport, airplane, flight, or travel settings FIRST. Use keywords like airport, terminal, gate, customs, boarding, flight, passport control, luggage, airline, check-in, security checkpoint, etc.
 
 Generate:
-1. One short English visual description (max 8 words) of the ideal stock clip — specific and set in an airport/travel context
-2. Four English search queries (max 6 words each): make each one different in angle, but ALL grounded in aviation/travel:
-   - q1: the specific action happening IN an airport/travel setting
-   - q2: the emotion or human element AT an airport/in transit
-   - q3: a broader aviation/travel context (security, customs, boarding, etc.)
-   - q4: a creative alternative still set in the aviation/travel world
+1. One short English visual description (max 8 words) of the ideal stock clip — set in an airport/travel context
+2. Four English search queries (max 6 words each):
+   - q1: the specific action in an airport/aviation setting
+   - q2: airport/travel setting with the emotion or human element
+   - q3: broader airport/aviation/travel context (security, customs, boarding, etc.)
+   - q4: a general broad fallback query WITHOUT aviation keywords (in case no aviation clips are found)
 
 Reply in EXACTLY this format:
 <desc>visual description here</desc>
