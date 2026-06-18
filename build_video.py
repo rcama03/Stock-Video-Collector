@@ -811,18 +811,18 @@ def generate_scene_queries(scene_text, is_english=False):
         return (desc, [desc])
     try:
         if is_english:
-            prompt = f"""You are a stock video researcher for a YouTube channel. This is a scene from a travel/aviation video:
+            prompt = f"""You are a stock video researcher for an AVIATION/TRAVEL YouTube channel. This is a scene from a video:
 "{scene_text[:300]}"
 
-Generate stock video search queries that are SPECIFIC and VARIED — avoid generic terms like "airplane cabin" or "airport terminal" unless the scene is literally about those. Instead, focus on the EMOTION, ACTION, or SPECIFIC SUBJECT of the scene.
+CRITICAL: This channel is aviation/travel niche. ALL queries MUST be set in an airport, airplane, flight, or travel context. Even if the scene discusses laws, documents, finances, or emotions — the visual must show that in an AIRPORT or TRAVEL setting (e.g. "officer questioning traveler at airport booth", NOT "person at desk"). Every query should include at least one aviation/travel keyword (airport, terminal, gate, customs, boarding, flight, passport control, luggage, airline, etc.).
 
 Generate:
-1. One short visual description (max 8 words) of the ideal stock clip — be specific and concrete
-2. Four search queries (max 6 words each): make each one different in angle:
-   - q1: the specific action or subject happening
-   - q2: the emotion or human element
-   - q3: a broader thematic term (profession, situation, context)
-   - q4: a creative/metaphorical alternative that captures the mood
+1. One short visual description (max 8 words) of the ideal stock clip — specific and set in an airport/travel context
+2. Four search queries (max 6 words each): make each one different in angle, but ALL grounded in aviation/travel:
+   - q1: the specific action happening IN an airport/travel setting
+   - q2: the emotion or human element AT an airport/in transit
+   - q3: a broader aviation/travel context (security, customs, boarding, etc.)
+   - q4: a creative alternative still set in the aviation/travel world
 
 Reply in EXACTLY this format:
 <desc>visual description here</desc>
@@ -831,18 +831,18 @@ Reply in EXACTLY this format:
 <q3>search query 3</q3>
 <q4>search query 4</q4>"""
         else:
-            prompt = f"""You are a stock video researcher for a YouTube channel. This is a scene from a German travel/aviation video voiceover:
+            prompt = f"""You are a stock video researcher for an AVIATION/TRAVEL YouTube channel. This is a scene from a German video voiceover:
 "{scene_text[:300]}"
 
-Generate English stock video search queries that are SPECIFIC and VARIED — avoid generic terms like "airplane cabin" or "airport terminal" unless the scene is literally about those. Instead, focus on the EMOTION, ACTION, or SPECIFIC SUBJECT of the scene.
+CRITICAL: This channel is aviation/travel niche. ALL queries MUST be set in an airport, airplane, flight, or travel context. Even if the scene discusses laws, documents, finances, or emotions — the visual must show that in an AIRPORT or TRAVEL setting (e.g. "airport customs officer checking passport", NOT "person reading documents"). Every query should include at least one aviation/travel keyword (airport, terminal, gate, customs, boarding, flight, passport control, luggage, airline, etc.).
 
 Generate:
-1. One short English visual description (max 8 words) of the ideal stock clip — be specific and concrete
-2. Four English search queries (max 6 words each): make each one different in angle:
-   - q1: the specific action or subject happening
-   - q2: the emotion or human element
-   - q3: a broader thematic term (profession, situation, context)
-   - q4: a creative/metaphorical alternative that captures the mood
+1. One short English visual description (max 8 words) of the ideal stock clip — specific and set in an airport/travel context
+2. Four English search queries (max 6 words each): make each one different in angle, but ALL grounded in aviation/travel:
+   - q1: the specific action happening IN an airport/travel setting
+   - q2: the emotion or human element AT an airport/in transit
+   - q3: a broader aviation/travel context (security, customs, boarding, etc.)
+   - q4: a creative alternative still set in the aviation/travel world
 
 Reply in EXACTLY this format:
 <desc>visual description here</desc>
