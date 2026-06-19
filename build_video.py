@@ -788,12 +788,22 @@ else:
 TOTAL_DUR = get_dur(AUDIO)
 
 def parse_script(script_path):
-    """Parse script file (German or English) into list of (scene_text, word_count)."""
+    """Parse script file (German or English) into list of (scene_text, word_count).
+    Also extracts title and hook from the header if present."""
     scenes = []
+    title = ""
+    hook = ""
     if not script_path or not os.path.exists(script_path):
-        return scenes
+        return scenes, title, hook
     with open(script_path, encoding="utf-8") as f:
         content = f.read()
+    # Extract title and hook from header
+    m = re.search(r'(?:TITLE|TITEL)\s*:\s*(.+)', content, re.IGNORECASE)
+    if m:
+        title = m.group(1).strip()
+    m = re.search(r'HOOK\s*:\s*(.+)', content, re.IGNORECASE)
+    if m:
+        hook = m.group(1).strip()
     # Support both [SZENE N] (German) and [SCENE N] (English)
     blocks = re.split(r'\[(?:SZENE|SCENE)\s+\d+[^\]]*\]', content, flags=re.IGNORECASE)
     for block in blocks[1:]:
@@ -801,27 +811,39 @@ def parse_script(script_path):
         if text:
             words = len(text.split())
             scenes.append((text, words))
-    return scenes
+    return scenes, title, hook
 
-def generate_scene_queries(scene_text, is_english=False):
-    """Generate CLIP search queries. If English text, extract directly; else translate via Claude."""
+def generate_scene_queries(scene_text, is_english=False, video_context=""):
+    """Generate CLIP search queries with global video context for better relevance."""
     if not _anthropic_client:
         words = scene_text.split()[:8]
         desc = " ".join(words)
         return (desc, [desc])
+
+    context_block = ""
+    if video_context:
+        context_block = f"""GLOBAL VIDEO CONTEXT (use this to keep clips thematically consistent):
+{video_context}
+
+"""
+
     try:
         if is_english:
-            prompt = f"""You are a stock video researcher for an AVIATION/TRAVEL YouTube channel. This is a scene from a video:
+            prompt = f"""You are a stock video researcher for an AVIATION/TRAVEL YouTube channel.
+
+{context_block}This is the current scene from the script:
 "{scene_text[:300]}"
 
 PRIORITY: This channel is aviation/travel niche. Queries should be grounded in airport, airplane, flight, or travel settings FIRST. Use keywords like airport, terminal, gate, customs, boarding, flight, passport control, luggage, airline, check-in, security checkpoint, etc.
 
+IMPORTANT: The visual description and queries must reflect BOTH the global video topic AND this specific scene. Clips should visually match what the narrator is saying while staying within the video's overall theme.
+
 Generate:
-1. One short visual description (max 8 words) of the ideal stock clip — set in an airport/travel context
+1. One short visual description (max 8 words) of the ideal stock clip — set in an airport/travel context, matching the scene content
 2. Four search queries (max 6 words each):
-   - q1: the specific action in an airport/aviation setting
-   - q2: airport/travel setting with the emotion or human element
-   - q3: broader airport/aviation/travel context (security, customs, boarding, etc.)
+   - q1: the specific action in an airport/aviation setting that matches this scene
+   - q2: airport/travel setting with the emotion or human element from this scene
+   - q3: broader airport/aviation/travel context related to the video's overall topic
    - q4: a general broad fallback query WITHOUT aviation keywords (in case no aviation clips are found)
 
 Reply in EXACTLY this format:
@@ -831,17 +853,21 @@ Reply in EXACTLY this format:
 <q3>search query 3</q3>
 <q4>search query 4</q4>"""
         else:
-            prompt = f"""You are a stock video researcher for an AVIATION/TRAVEL YouTube channel. This is a scene from a German video voiceover:
+            prompt = f"""You are a stock video researcher for an AVIATION/TRAVEL YouTube channel.
+
+{context_block}This is the current scene from a German video voiceover:
 "{scene_text[:300]}"
 
 PRIORITY: This channel is aviation/travel niche. Queries should be grounded in airport, airplane, flight, or travel settings FIRST. Use keywords like airport, terminal, gate, customs, boarding, flight, passport control, luggage, airline, check-in, security checkpoint, etc.
 
+IMPORTANT: The visual description and queries must reflect BOTH the global video topic AND this specific scene. Clips should visually match what the narrator is saying while staying within the video's overall theme.
+
 Generate:
-1. One short English visual description (max 8 words) of the ideal stock clip — set in an airport/travel context
+1. One short English visual description (max 8 words) of the ideal stock clip — set in an airport/travel context, matching the scene content
 2. Four English search queries (max 6 words each):
-   - q1: the specific action in an airport/aviation setting
-   - q2: airport/travel setting with the emotion or human element
-   - q3: broader airport/aviation/travel context (security, customs, boarding, etc.)
+   - q1: the specific action in an airport/aviation setting that matches this scene
+   - q2: airport/travel setting with the emotion or human element from this scene
+   - q3: broader airport/aviation/travel context related to the video's overall topic
    - q4: a general broad fallback query WITHOUT aviation keywords (in case no aviation clips are found)
 
 Reply in EXACTLY this format:
@@ -878,8 +904,17 @@ Reply in EXACTLY this format:
 _german_script_path = sys.argv[3] if len(sys.argv) > 3 else None
 _english_script_path = sys.argv[4] if len(sys.argv) > 4 else None
 
-_german_scenes  = parse_script(_german_script_path)  if _german_script_path  else []
-_english_scenes = parse_script(_english_script_path) if _english_script_path else []
+_german_scenes, _german_title, _german_hook   = parse_script(_german_script_path)  if _german_script_path  else ([], "", "")
+_english_scenes, _english_title, _english_hook = parse_script(_english_script_path) if _english_script_path else ([], "", "")
+
+# Build global video context from title+hook (prefer English)
+_video_title = _english_title or _german_title
+_video_hook  = _english_hook or _german_hook
+_video_context = ""
+if _video_title:
+    _video_context = f"Video title: {_video_title}"
+    if _video_hook:
+        _video_context += f"\nVideo hook: {_video_hook}"
 
 # Use German for word-count timing, English for query generation (if available)
 _timing_scenes = _german_scenes if _german_scenes else _english_scenes
@@ -894,10 +929,12 @@ if _scenes:
     SCENE_WORDS = [w for _, w in _scenes]
     src_label = "German+English" if (_german_scenes and _english_scenes) else ("English" if _is_english else "German")
     print(f"Script loaded ({src_label}): {len(_scenes)} scenes, {total_words} words, rate={RATE:.3f}s/word")
+    if _video_context:
+        print(f"Video context: {_video_title[:80]}")
     print("Generating scene queries via Claude…")
     SCENE_META = []
     for i, (scene_text, _) in enumerate(_query_scenes):
-        desc, queries = generate_scene_queries(scene_text, is_english=_is_english)
+        desc, queries = generate_scene_queries(scene_text, is_english=_is_english, video_context=_video_context)
         SCENE_META.append((desc, queries))
         print(f"  Scene {i+1:2d}: {desc[:60]}")
 else:
@@ -937,6 +974,7 @@ for i, (s_start, s_end, (desc, queries)) in enumerate(
             "end": round(end, 3),
             "dur": round(end - t, 3),
             "desc": desc,
+            "clip_desc": f"Aviation travel video: {desc}" if _video_title else desc,
             "queries": queries,
             "scene": i,
             "scene_last": is_last,
@@ -963,6 +1001,7 @@ consecutive_images = 0  # running count of back-to-back Ken Burns image segments
 
 for i, clip in enumerate(CLIPS):
     desc    = clip["desc"]
+    clip_desc = clip.get("clip_desc", desc)  # context-enriched desc for CLIP scoring
     queries = clip["queries"]
     dur     = clip["dur"]
     seg_p   = f"{SEGDIR}/s{i:04d}.mp4"
@@ -1007,7 +1046,7 @@ for i, clip in enumerate(CLIPS):
             print(f"  DL retry failed{' ('+label+')' if label else ''}: {_vid}")
         return None
 
-    url, vid, src_dur = best_candidate(candidates, desc,
+    url, vid, src_dur = best_candidate(candidates, clip_desc,
                                        source_counts=source_counts, total_clips=len(seg_paths))
 
     # fallback: generic airport/travel clip
@@ -1061,7 +1100,7 @@ for i, clip in enumerate(CLIPS):
     actual_dur = get_dur(raw_p) or src_dur
 
     # ── Step 2: best offset within clip ───────────────────────────────────
-    best_t, best_s = best_offset(raw_p, desc, dur, actual_dur)
+    best_t, best_s = best_offset(raw_p, clip_desc, dur, actual_dur)
 
     # ── Image fallback: no good video match → try a Ken Burns still ────────
     # Only when the video score is poor AND we haven't already placed
@@ -1074,7 +1113,7 @@ for i, clip in enumerate(CLIPS):
         img_cands = search_images(queries, top_n=12)
         scored = []
         for iurl, iid, ithumb in img_cands:
-            scored.append((clip_score_url(ithumb, desc) if ithumb else 0.0, iurl, iid))
+            scored.append((clip_score_url(ithumb, clip_desc) if ithumb else 0.0, iurl, iid))
         scored.sort(reverse=True)
         if scored and scored[0][0] > best_s:
             img_s, img_url, img_id = scored[0]
@@ -1155,7 +1194,7 @@ for i, clip in enumerate(CLIPS):
             _araw = f"{RAWDIR}/r{i:04d}_{_avid}.mp4"
             if download(_aurl, _araw):
                 _adur_actual = get_dur(_araw) or _adur
-                _at, _as = best_offset(_araw, desc, dur, _adur_actual)
+                _at, _as = best_offset(_araw, clip_desc, dur, _adur_actual)
                 if make_seg(_araw, seg_p, dur, start_offset=_at, scene_last=clip["scene_last"]):
                     used_ids.add(_avid); session_used.add(_avid)
                     _atag = _avid.split("_")[0] if "_" in _avid else "?"
