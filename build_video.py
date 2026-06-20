@@ -1309,18 +1309,20 @@ else:
 # Use audio duration as the master length — trim video to match
 print(f"Muxing → {OUTPUT}")
 audio_dur = get_dur(AUDIO)
-fade_out_start = max(0, audio_dur - 1.5)
+fade_dur = 2.5
+end_dur = audio_dur + 1.0  # pad 1s beyond audio so fade completes fully
+fade_out_start = max(0, audio_dur - fade_dur)
 # If video shorter than audio, freeze last frame to fill the gap
-vfilt = f"[0:v]tpad=stop_mode=clone:stop_duration={max(0, audio_dur - vid_dur + 2):.3f},trim=end={audio_dur:.3f},setpts=PTS-STARTPTS,fade=out:st={fade_out_start:.3f}:d=1.5[vout]"
+vfilt = f"[0:v]tpad=stop_mode=clone:stop_duration={max(0, end_dur - vid_dur + 2):.3f},trim=end={end_dur:.3f},setpts=PTS-STARTPTS,fade=out:st={fade_out_start:.3f}:d={fade_dur + 1.0:.1f}[vout]"
 r = subprocess.run([FFMPEG,"-y",
                     "-i", combined, "-i", mixed,
                     "-filter_complex",
                     (f"{vfilt};"
-                     f"[1:a]afade=t=out:st={fade_out_start:.3f}:d=1.5[aout]"),
+                     f"[1:a]apad=pad_dur=1,afade=t=out:st={fade_out_start:.3f}:d={fade_dur:.1f}[aout]"),
                     "-map","[vout]","-map","[aout]",
                     "-c:v","libx264","-preset","fast","-crf","21",
                     "-c:a","aac","-b:a","128k",
-                    "-shortest", OUTPUT], capture_output=True)
+                    "-t", f"{end_dur:.3f}", OUTPUT], capture_output=True)
 if r.returncode != 0:
     print("MUX ERROR:", r.stderr.decode()[-400:]); sys.exit(1)
 
