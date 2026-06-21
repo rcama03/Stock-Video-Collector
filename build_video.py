@@ -525,7 +525,7 @@ def search_searchapi(queries, min_dur, top_n=8):
 def _resolve_stock_url(link, vid):
     """For SerpAPI/SearchAPI results that point to stock site pages, resolve to direct video URL."""
     try:
-        if "sp_px_" in vid or "sa_px_" in vid:
+        if "ddg_px_" in vid or "sp_px_" in vid or "sa_px_" in vid:
             pid = vid.split("_")[-1]
             r = requests.get(f"https://api.pexels.com/videos/videos/{pid}",
                              headers={"Authorization": PEXELS_KEY}, timeout=15)
@@ -534,7 +534,7 @@ def _resolve_stock_url(link, vid):
                                 key=lambda x: x.get("width", 0), reverse=True):
                     if 640 <= f.get("width", 0) <= 1920:
                         return f["link"]
-        elif "sp_pb_" in vid or "sa_pb_" in vid:
+        elif "ddg_pb_" in vid or "sp_pb_" in vid or "sa_pb_" in vid:
             pid = vid.split("_")[-1]
             r = requests.get("https://pixabay.com/api/videos/",
                              params={"key": PIXABAY_KEY, "id": pid}, timeout=15)
@@ -545,12 +545,50 @@ def _resolve_stock_url(link, vid):
                         vf = hits[0].get("videos", {}).get(q, {})
                         if vf.get("width", 0) >= 640 and vf.get("url"):
                             return vf["url"]
-        elif "sp_mx_" in vid or "sa_mx_" in vid:
+        elif "ddg_mx_" in vid or "sp_mx_" in vid or "sa_mx_" in vid:
             mid = vid.split("_")[-1]
             return f"https://assets.mixkit.co/videos/{mid}/{mid}-720.mp4"
     except Exception:
         pass
     return None
+
+
+def search_duckduckgo(queries, min_dur, top_n=8):
+    """Search DuckDuckGo for stock video clips (no API key needed)."""
+    try:
+        from duckduckgo_search import DDGS
+    except ImportError:
+        return []
+    results = []
+    with DDGS() as ddgs:
+        for query in queries[:2]:
+            try:
+                vids = list(ddgs.videos(f"{query} free stock video", max_results=15))
+                for v in vids:
+                    link = v.get("content", "")
+                    vid = None
+                    if "pexels.com/video/" in link:
+                        m = re.search(r'/video/[^/]+-(\d+)', link) or re.search(r'/video/(\d+)', link)
+                        if m:
+                            vid = f"ddg_px_{m.group(1)}"
+                    elif "pixabay.com/videos/" in link:
+                        m = re.search(r'-(\d+)/?$', link)
+                        if m:
+                            vid = f"ddg_pb_{m.group(1)}"
+                    elif "mixkit.co/" in link:
+                        m = re.search(r'/(\d+)/?$', link)
+                        if m:
+                            vid = f"ddg_mx_{m.group(1)}"
+                    if not vid or vid in used_ids:
+                        continue
+                    thumb = v.get("thumbnail", "")
+                    results.append((link, vid, 15, thumb))
+                    if len(results) >= top_n:
+                        return results
+            except Exception:
+                pass
+            time.sleep(0.2)
+    return results
 
 
 DIVERSITY_PENALTY = 0.12
@@ -649,6 +687,24 @@ def search_images(queries, top_n=12):
             if len(results) >= top_n: break
             time.sleep(0.1)
     except Exception: pass
+    # ── DuckDuckGo images (no API key needed) ──
+    if len(results) < top_n:
+        try:
+            from duckduckgo_search import DDGS
+            with DDGS() as ddgs:
+                for p in ddgs.images(f"{queries[0]} stock photo", max_results=8):
+                    orig = p.get("image", "")
+                    if not orig or "youtube" in orig.lower():
+                        continue
+                    iid = f"ddgimg_{abs(hash(orig))}"
+                    if iid in used_ids:
+                        continue
+                    thumb = p.get("thumbnail", orig)
+                    results.append((orig, iid, thumb))
+                    if len(results) >= top_n:
+                        break
+        except Exception:
+            pass
     # ── SerpAPI images ──
     if SERPAPI_KEY and len(results) < top_n:
         try:
@@ -1187,6 +1243,7 @@ for i, clip in enumerate(CLIPS):
         lambda: search_vecteezy(queries, min_src, top_n=10),
         lambda: search_serpapi(queries, min_src, top_n=8),
         lambda: search_searchapi(queries, min_src, top_n=8),
+        lambda: search_duckduckgo(queries, min_src, top_n=8),
     ]
     random.shuffle(_sources)
     for _src in _sources:
@@ -1198,7 +1255,7 @@ for i, clip in enumerate(CLIPS):
             if _vid in used_ids:
                 continue
             dl_url = _url
-            if _vid.startswith("sp_") or _vid.startswith("sa_"):
+            if _vid.startswith(("sp_", "sa_", "ddg_")):
                 resolved = _resolve_stock_url(_url, _vid)
                 if not resolved:
                     continue
@@ -1239,7 +1296,7 @@ for i, clip in enumerate(CLIPS):
     used_ids.add(vid)
     raw_p = f"{RAWDIR}/r{i:04d}_{vid}.mp4"
 
-    if vid.startswith("sp_") or vid.startswith("sa_"):
+    if vid.startswith(("sp_", "sa_", "ddg_")):
         resolved = _resolve_stock_url(url, vid)
         if resolved:
             url = resolved
@@ -1346,6 +1403,7 @@ for i, clip in enumerate(CLIPS):
                 br_candidates += search_vecteezy(broll_queries, BROLL_DURATION, top_n=4)
                 br_candidates += search_serpapi(broll_queries, BROLL_DURATION, top_n=4)
                 br_candidates += search_searchapi(broll_queries, BROLL_DURATION, top_n=4)
+                br_candidates += search_duckduckgo(broll_queries, BROLL_DURATION, top_n=4)
                 br_url, br_vid, br_src_dur = best_candidate(br_candidates, broll_queries[0])
                 if br_url and br_vid not in used_ids:
                     used_ids.add(br_vid)
