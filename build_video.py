@@ -47,6 +47,8 @@ SHUTTERSTOCK_CLIENT_ID     = os.getenv("SHUTTERSTOCK_CLIENT_ID")
 SHUTTERSTOCK_CLIENT_SECRET = os.getenv("SHUTTERSTOCK_CLIENT_SECRET")
 ANTHROPIC_KEY    = os.getenv("ANTHROPIC_API_KEY")
 UNSPLASH_KEY     = os.getenv("UNSPLASH_API_KEY")
+SERPAPI_KEY       = os.getenv("SERPAPI_API_KEY")
+SEARCHAPI_KEY     = os.getenv("SEARCHAPI_API_KEY")
 
 # B-roll config
 BROLL_EVERY_N_CLIPS = 8    # insert b-roll after every N main clips
@@ -438,6 +440,119 @@ def search_vecteezy(queries, min_dur, top_n=6):
 # Diversity weighting: penalize sources that already dominate the video so
 # relevant clips from under-used sources get a fair chance. Tuned against the
 # typical CLIP score spread (~0.18-0.33) so it nudges, never overrides, relevance.
+def search_serpapi(queries, min_dur, top_n=8):
+    """Search Google Videos via SerpAPI for stock footage on Pexels/Pixabay/Mixkit etc."""
+    if not SERPAPI_KEY:
+        return []
+    results = []
+    for query in queries[:2]:
+        try:
+            r = requests.get("https://serpapi.com/search.json",
+                             params={"q": f"{query} free stock video",
+                                     "tbm": "vid", "api_key": SERPAPI_KEY, "num": 10},
+                             timeout=20)
+            if r.status_code != 200:
+                continue
+            for v in r.json().get("video_results", []):
+                link = v.get("link", "")
+                # Only use results pointing to known stock sites with direct video
+                vid = None
+                if "pexels.com/video/" in link:
+                    m = re.search(r'/video/[^/]+-(\d+)', link) or re.search(r'/video/(\d+)', link)
+                    if m:
+                        vid = f"sp_px_{m.group(1)}"
+                elif "pixabay.com/videos/" in link:
+                    m = re.search(r'-(\d+)/?$', link)
+                    if m:
+                        vid = f"sp_pb_{m.group(1)}"
+                elif "mixkit.co/" in link:
+                    m = re.search(r'/(\d+)/?$', link)
+                    if m:
+                        vid = f"sp_mx_{m.group(1)}"
+                if not vid or vid in used_ids:
+                    continue
+                thumb = v.get("thumbnail", "")
+                results.append((link, vid, 15, thumb))
+                if len(results) >= top_n:
+                    return results
+        except Exception:
+            pass
+        time.sleep(0.2)
+    return results
+
+
+def search_searchapi(queries, min_dur, top_n=8):
+    """Search Google Videos via SearchAPI.io for stock footage."""
+    if not SEARCHAPI_KEY:
+        return []
+    results = []
+    for query in queries[:2]:
+        try:
+            r = requests.get("https://www.searchapi.io/api/v1/search",
+                             params={"engine": "google_videos",
+                                     "q": f"{query} free stock video",
+                                     "api_key": SEARCHAPI_KEY, "num": 10},
+                             timeout=20)
+            if r.status_code != 200:
+                continue
+            for v in r.json().get("videos", r.json().get("video_results", [])):
+                link = v.get("link", "")
+                vid = None
+                if "pexels.com/video/" in link:
+                    m = re.search(r'/video/[^/]+-(\d+)', link) or re.search(r'/video/(\d+)', link)
+                    if m:
+                        vid = f"sa_px_{m.group(1)}"
+                elif "pixabay.com/videos/" in link:
+                    m = re.search(r'-(\d+)/?$', link)
+                    if m:
+                        vid = f"sa_pb_{m.group(1)}"
+                elif "mixkit.co/" in link:
+                    m = re.search(r'/(\d+)/?$', link)
+                    if m:
+                        vid = f"sa_mx_{m.group(1)}"
+                if not vid or vid in used_ids:
+                    continue
+                thumb = v.get("thumbnail", "")
+                results.append((link, vid, 15, thumb))
+                if len(results) >= top_n:
+                    return results
+        except Exception:
+            pass
+        time.sleep(0.2)
+    return results
+
+
+def _resolve_stock_url(link, vid):
+    """For SerpAPI/SearchAPI results that point to stock site pages, resolve to direct video URL."""
+    try:
+        if "sp_px_" in vid or "sa_px_" in vid:
+            pid = vid.split("_")[-1]
+            r = requests.get(f"https://api.pexels.com/videos/videos/{pid}",
+                             headers={"Authorization": PEXELS_KEY}, timeout=15)
+            if r.status_code == 200:
+                for f in sorted(r.json().get("video_files", []),
+                                key=lambda x: x.get("width", 0), reverse=True):
+                    if 640 <= f.get("width", 0) <= 1920:
+                        return f["link"]
+        elif "sp_pb_" in vid or "sa_pb_" in vid:
+            pid = vid.split("_")[-1]
+            r = requests.get("https://pixabay.com/api/videos/",
+                             params={"key": PIXABAY_KEY, "id": pid}, timeout=15)
+            if r.status_code == 200:
+                hits = r.json().get("hits", [])
+                if hits:
+                    for q in ["large", "medium", "small"]:
+                        vf = hits[0].get("videos", {}).get(q, {})
+                        if vf.get("width", 0) >= 640 and vf.get("url"):
+                            return vf["url"]
+        elif "sp_mx_" in vid or "sa_mx_" in vid:
+            mid = vid.split("_")[-1]
+            return f"https://assets.mixkit.co/videos/{mid}/{mid}-720.mp4"
+    except Exception:
+        pass
+    return None
+
+
 DIVERSITY_PENALTY = 0.12
 SOURCE_HARD_CAP   = 0.50   # no single source can exceed 50% of total clips
 
@@ -534,6 +649,46 @@ def search_images(queries, top_n=12):
             if len(results) >= top_n: break
             time.sleep(0.1)
     except Exception: pass
+    # ── SerpAPI images ──
+    if SERPAPI_KEY and len(results) < top_n:
+        try:
+            r = requests.get("https://serpapi.com/search.json",
+                             params={"q": f"{queries[0]} stock photo", "tbm": "isch",
+                                     "api_key": SERPAPI_KEY, "num": 8}, timeout=20)
+            if r.status_code == 200:
+                for p in r.json().get("images_results", [])[:8]:
+                    orig = p.get("original", "")
+                    if not orig or "youtube" in orig.lower():
+                        continue
+                    iid = f"spimg_{abs(hash(orig))}"
+                    if iid in used_ids:
+                        continue
+                    thumb = p.get("thumbnail", orig)
+                    results.append((orig, iid, thumb))
+                    if len(results) >= top_n:
+                        break
+        except Exception:
+            pass
+    # ── SearchAPI images ──
+    if SEARCHAPI_KEY and len(results) < top_n:
+        try:
+            r = requests.get("https://www.searchapi.io/api/v1/search",
+                             params={"engine": "google_images", "q": f"{queries[0]} stock photo",
+                                     "api_key": SEARCHAPI_KEY, "num": 8}, timeout=20)
+            if r.status_code == 200:
+                for p in r.json().get("images", [])[:8]:
+                    orig = p.get("original", p.get("link", ""))
+                    if not orig or "youtube" in orig.lower():
+                        continue
+                    iid = f"saimg_{abs(hash(orig))}"
+                    if iid in used_ids:
+                        continue
+                    thumb = p.get("thumbnail", orig)
+                    results.append((orig, iid, thumb))
+                    if len(results) >= top_n:
+                        break
+        except Exception:
+            pass
     # ── Unsplash (last; demo tier = 50 req/hr, so query only the top term) ──
     if UNSPLASH_KEY:
         try:
@@ -1030,6 +1185,8 @@ for i, clip in enumerate(CLIPS):
         lambda: search_coverr(queries, min_src, top_n=10),
         lambda: search_mixkit(queries[:2], min_src, top_n=10),
         lambda: search_vecteezy(queries, min_src, top_n=10),
+        lambda: search_serpapi(queries, min_src, top_n=8),
+        lambda: search_searchapi(queries, min_src, top_n=8),
     ]
     random.shuffle(_sources)
     for _src in _sources:
@@ -1040,9 +1197,15 @@ for i, clip in enumerate(CLIPS):
         for _url, _vid, _sdur, *_ in pool:
             if _vid in used_ids:
                 continue
+            dl_url = _url
+            if _vid.startswith("sp_") or _vid.startswith("sa_"):
+                resolved = _resolve_stock_url(_url, _vid)
+                if not resolved:
+                    continue
+                dl_url = resolved
             _raw = f"{RAWDIR}/r{i:04d}_{_vid}.mp4"
-            if download(_url, _raw):
-                return _url, _vid, _sdur, _raw
+            if download(dl_url, _raw):
+                return dl_url, _vid, _sdur, _raw
             print(f"  DL retry failed{' ('+label+')' if label else ''}: {_vid}")
         return None
 
@@ -1076,7 +1239,15 @@ for i, clip in enumerate(CLIPS):
     used_ids.add(vid)
     raw_p = f"{RAWDIR}/r{i:04d}_{vid}.mp4"
 
-    if not download(url, raw_p):
+    if vid.startswith("sp_") or vid.startswith("sa_"):
+        resolved = _resolve_stock_url(url, vid)
+        if resolved:
+            url = resolved
+        else:
+            used_ids.discard(vid)
+            url = None
+
+    if not url or not download(url, raw_p):
         # First choice failed — try remaining candidates before giving up
         print(f"[{i:3d}] ✗ download failed — trying alternatives…")
         used_ids.discard(vid)
@@ -1173,6 +1344,8 @@ for i, clip in enumerate(CLIPS):
                 br_candidates += search_coverr(broll_queries, BROLL_DURATION, top_n=6)
                 br_candidates += search_mixkit(broll_queries[:1], BROLL_DURATION, top_n=4)
                 br_candidates += search_vecteezy(broll_queries, BROLL_DURATION, top_n=4)
+                br_candidates += search_serpapi(broll_queries, BROLL_DURATION, top_n=4)
+                br_candidates += search_searchapi(broll_queries, BROLL_DURATION, top_n=4)
                 br_url, br_vid, br_src_dur = best_candidate(br_candidates, broll_queries[0])
                 if br_url and br_vid not in used_ids:
                     used_ids.add(br_vid)
