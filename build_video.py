@@ -31,6 +31,10 @@ CTADIR   = f"{WORK}/cta"
 IMGDIR   = f"{WORK}/img"
 
 for d in [RAWDIR, SEGDIR, FRMDIR, THUMBDIR, CTADIR, IMGDIR]:
+    if d == SEGDIR:
+        import shutil
+        if os.path.exists(d):
+            shutil.rmtree(d)
     os.makedirs(d, exist_ok=True)
 
 # ── Config ───────────────────────────────────────────────────────────────────
