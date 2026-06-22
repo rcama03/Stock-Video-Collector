@@ -1534,7 +1534,7 @@ if has_whoosh:
     r = subprocess.run([FFMPEG,"-y",
                         "-i", AUDIO, "-i", whoosh_track,
                         "-filter_complex",
-                        "[0:a]volume=1.8[v0];[v0][1:a]amix=inputs=2:normalize=0[aout]",
+                        "[0:a]volume=1.8[v0];[v0][1:a]amix=inputs=2:duration=longest:normalize=0[aout]",
                         "-map","[aout]","-c:a","aac","-b:a","128k", mixed],
                        capture_output=True)
     if r.returncode != 0:
