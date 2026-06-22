@@ -597,10 +597,11 @@ def search_duckduckgo(queries, min_dur, top_n=8):
 
 DIVERSITY_PENALTY = 0.12
 SOURCE_HARD_CAP   = 0.50   # no single source can exceed 50% of total clips
+PEXELS_HARD_CAP   = 0.35   # Pexels specifically capped lower to force variety
 
 def best_candidate(candidates, desc, source_counts=None, total_clips=0):
     """Step 1: CLIP-score all candidate thumbnails, return best (url, vid, dur).
-    Applies diversity penalty to over-represented sources and enforces a hard cap."""
+    Applies diversity penalty to over-represented sources and enforces hard caps."""
     if not candidates:
         return None, None, 0
     scored = []
@@ -610,8 +611,9 @@ def best_candidate(candidates, desc, source_counts=None, total_clips=0):
         if source_counts and total_clips > 0:
             share = source_counts.get(src, 0) / total_clips
             s -= DIVERSITY_PENALTY * share
-            if total_clips >= 10 and share >= SOURCE_HARD_CAP:
-                s -= 0.5  # effectively disqualifies this source
+            cap = PEXELS_HARD_CAP if src == "px" else SOURCE_HARD_CAP
+            if total_clips >= 10 and share >= cap:
+                s -= 0.5
         scored.append((s, url, vid, dur))
     scored.sort(reverse=True)
     _, url, vid, dur = scored[0]
@@ -1239,8 +1241,8 @@ for i, clip in enumerate(CLIPS):
     # ── Step 1: gather candidates from all sources ─────────────────────────
     min_src = dur + 2
     candidates = []
-    _sources = [
-        lambda: search_pexels(queries, min_src, top_n=15),
+    _all_sources = [
+        lambda: search_pexels(queries, min_src, top_n=12),
         lambda: search_pixabay(queries, min_src, top_n=12),
         lambda: search_coverr(queries, min_src, top_n=10),
         lambda: search_mixkit(queries[:2], min_src, top_n=10),
@@ -1249,7 +1251,8 @@ for i, clip in enumerate(CLIPS):
         lambda: search_searchapi(queries, min_src, top_n=8),
         lambda: search_duckduckgo(queries, min_src, top_n=8),
     ]
-    random.shuffle(_sources)
+    # Round-robin: rotate source priority based on clip index for variety
+    _sources = _all_sources[i % len(_all_sources):] + _all_sources[:i % len(_all_sources)]
     for _src in _sources:
         candidates += _src()
 
@@ -1545,15 +1548,16 @@ else:
 print(f"Muxing → {OUTPUT}")
 audio_dur = get_dur(AUDIO)
 fade_dur = 2.0
-end_dur = audio_dur + fade_dur + 0.5  # voiceover plays fully, then fade, then brief black
-fade_out_start = audio_dur  # fade begins AFTER voiceover finishes
+audio_buffer = 1.0  # 1s silence after voiceover ends before fade begins
+fade_out_start = audio_dur + audio_buffer  # fade begins 1s AFTER voiceover finishes
+end_dur = fade_out_start + fade_dur + 0.5  # full timeline: audio → 1s pause → 2s fade → 0.5s black
 # If video shorter than needed, freeze last frame to fill the gap
 vfilt = f"[0:v]tpad=stop_mode=clone:stop_duration={max(0, end_dur - vid_dur + 2):.3f},trim=end={end_dur:.3f},setpts=PTS-STARTPTS,fade=out:st={fade_out_start:.3f}:d={fade_dur:.1f}[vout]"
 r = subprocess.run([FFMPEG,"-y",
                     "-i", combined, "-i", mixed,
                     "-filter_complex",
                     (f"{vfilt};"
-                     f"[1:a]apad=pad_dur={fade_dur + 0.5:.1f},afade=t=out:st={fade_out_start:.3f}:d={fade_dur:.1f}[aout]"),
+                     f"[1:a]apad=pad_dur={audio_buffer + fade_dur + 0.5:.1f},afade=t=out:st={fade_out_start:.3f}:d={fade_dur:.1f}[aout]"),
                     "-map","[vout]","-map","[aout]",
                     "-c:v","libx264","-preset","fast","-crf","21",
                     "-c:a","aac","-b:a","128k",
