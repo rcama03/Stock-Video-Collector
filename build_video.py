@@ -1247,7 +1247,7 @@ for i, clip in enumerate(CLIPS):
         lambda: search_coverr(queries, min_src, top_n=10),
         lambda: search_mixkit(queries[:2], min_src, top_n=10),
         lambda: search_vecteezy(queries, min_src, top_n=10),
-        lambda: search_serpapi(queries, min_src, top_n=8),
+        # search_serpapi disabled — API credits exhausted
         lambda: search_searchapi(queries, min_src, top_n=8),
         lambda: search_duckduckgo(queries, min_src, top_n=8),
     ]
@@ -1408,7 +1408,7 @@ for i, clip in enumerate(CLIPS):
                 br_candidates += search_coverr(broll_queries, BROLL_DURATION, top_n=6)
                 br_candidates += search_mixkit(broll_queries[:1], BROLL_DURATION, top_n=4)
                 br_candidates += search_vecteezy(broll_queries, BROLL_DURATION, top_n=4)
-                br_candidates += search_serpapi(broll_queries, BROLL_DURATION, top_n=4)
+                # search_serpapi disabled — API credits exhausted
                 br_candidates += search_searchapi(broll_queries, BROLL_DURATION, top_n=4)
                 br_candidates += search_duckduckgo(broll_queries, BROLL_DURATION, top_n=4)
                 br_url, br_vid, br_src_dur = best_candidate(br_candidates, broll_queries[0])
