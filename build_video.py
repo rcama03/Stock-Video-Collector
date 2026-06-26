@@ -12,7 +12,7 @@ Features (from pipeline_config.py):
   - B-roll cutaways at pauses
 """
 
-import os, sys, re, time, json, random, subprocess, requests, torch, textwrap
+import os, sys, re, time, json, random, subprocess, requests, torch, textwrap, base64
 import anthropic
 from PIL import Image, ImageDraw, ImageFont
 from transformers import CLIPModel, CLIPProcessor
@@ -102,28 +102,51 @@ def clip_score(image_path, text):
         return 0.0
 
 _anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY) if ANTHROPIC_KEY else None
+
+# Models: Opus 4.8 for reasoning-heavy text steps (scene queries, b-roll, clip
+# verification). Haiku kept as a cheap fast fallback id if Opus is unavailable.
+LLM_TEXT_MODEL   = "claude-opus-4-8"
+LLM_VISION_MODEL = "claude-opus-4-8"
+
+# Clip rejection: when CLIP's best score for a clip lands in this borderline band,
+# ask the vision model to confirm the clip actually matches the scene meaning
+# (not just visual keywords). Above the band CLIP is confidently right; below it
+# the existing image-fallback path already handles the miss. Gating to the band
+# keeps vision calls (slow + costly) limited to the genuinely ambiguous clips.
+CLIP_VERIFY_LOW  = 0.20
+CLIP_VERIFY_HIGH = 0.28
 _broll_cache = {}
 
-def get_broll_queries(scene_text):
-    """Use Claude to generate 3 b-roll cutaway search queries for a scene."""
-    if scene_text in _broll_cache:
-        return _broll_cache[scene_text]
+def get_broll_queries(scene_text, video_context=""):
+    """Use Claude to generate 3 scene-aware b-roll cutaway search queries.
+
+    Scene-aware: the model is given the overall video topic AND the specific
+    scene so the cutaway complements what the narrator is saying at that moment
+    (e.g. a medication scene gets a pill-bottle close-up, not a generic plane)."""
+    cache_key = (scene_text, video_context)
+    if cache_key in _broll_cache:
+        return _broll_cache[cache_key]
     if not _anthropic_client:
         return []
+    context_block = f"OVERALL VIDEO TOPIC:\n{video_context}\n\n" if video_context else ""
     try:
         msg = _anthropic_client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=120,
+            model=LLM_TEXT_MODEL,
+            max_tokens=150,
             messages=[{"role":"user","content":
-                f"""Given this voiceover scene text (German aviation/travel video):
+                f"""You are choosing b-roll cutaway shots for an aviation/travel YouTube video.
+
+{context_block}CURRENT SCENE (voiceover, German):
 "{scene_text}"
 
-Generate exactly 3 short English search queries for close-up b-roll cutaway shots that visually match this scene.
-Rules: each query max 5 words, focus on close-up detail shots, no people's faces.
+Generate exactly 3 short English search queries for close-up b-roll cutaway shots
+that complement THIS scene's specific subject while fitting the overall video topic.
+Rules: each query max 5 words, focus on concrete close-up detail shots that match the
+scene's actual subject (an object, document, or action the narrator mentions), no faces.
 Reply with ONLY 3 lines, one query per line, nothing else."""}]
         )
         queries = [l.strip() for l in msg.content[0].text.strip().split("\n") if l.strip()][:3]
-        _broll_cache[scene_text] = queries
+        _broll_cache[cache_key] = queries
         return queries
     except Exception as e:
         print(f"  B-roll query error: {e}")
@@ -140,6 +163,41 @@ def clip_score_url(url, text):
         except Exception:
             return 0.0
     return clip_score(p, text) if os.path.exists(p) else 0.0
+
+def verify_clip_semantic(frame_path, scene_text, clip_desc):
+    """Vision check: does this frame actually fit the scene's MEANING?
+
+    CLIP scores raw visual/keyword similarity and can be fooled — e.g. a generic
+    airport shot scores well on a scene that's really about medication packaging.
+    This sends the actual chosen frame to the vision model and asks a yes/no
+    semantic-fit question. Returns True (keep) / False (reject). Fails OPEN (keeps
+    the clip) on any error so a model hiccup never blocks a build."""
+    if not _anthropic_client or not os.path.exists(frame_path):
+        return True
+    try:
+        with open(frame_path, "rb") as f:
+            img_b64 = base64.standard_b64encode(f.read()).decode()
+        msg = _anthropic_client.messages.create(
+            model=LLM_VISION_MODEL,
+            max_tokens=10,
+            messages=[{"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64",
+                 "media_type": "image/jpeg", "data": img_b64}},
+                {"type": "text", "text":
+                 f"""This frame is a candidate clip for a faceless aviation/travel video.
+Scene voiceover (German): "{scene_text[:200]}"
+Intended visual: "{clip_desc}"
+
+Does this frame REASONABLY fit the scene — same general subject/setting, not jarring or off-topic?
+Be lenient: stock footage is rarely literal. Reject only if clearly unrelated or misleading.
+Answer with ONLY one word: YES or NO."""}
+            ]}]
+        )
+        ans = msg.content[0].text.strip().upper()
+        return not ans.startswith("NO")
+    except Exception as e:
+        print(f"  clip verify error (keeping clip): {e}")
+        return True
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 # Cross-video dedup with a cooldown window: a clip used in a recent video is
@@ -1095,7 +1153,7 @@ Reply in EXACTLY this format:
 <q4>search query 4</q4>"""
 
         msg = _anthropic_client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=LLM_TEXT_MODEL,
             max_tokens=300,
             messages=[{"role": "user", "content": prompt}]
         )
@@ -1152,14 +1210,14 @@ if _scenes:
     SCENE_META = []
     for i, (scene_text, _) in enumerate(_query_scenes):
         desc, queries = generate_scene_queries(scene_text, is_english=_is_english, video_context=_video_context)
-        SCENE_META.append((desc, queries))
+        SCENE_META.append((desc, queries, scene_text))
         print(f"  Scene {i+1:2d}: {desc[:60]}")
 else:
     # Fallback: single scene covering full audio
     print("WARNING: No script found — using single generic scene")
     RATE = 1.0
     SCENE_WORDS = [int(TOTAL_DUR / 5.5)]
-    SCENE_META = [("travel airport airplane flight", ["travel airport airplane flight", "airplane passenger travel", "airport terminal travel"])]
+    SCENE_META = [("travel airport airplane flight", ["travel airport airplane flight", "airplane passenger travel", "airport terminal travel"], "")]
 
 scene_starts = []
 t = 0.0
@@ -1174,7 +1232,7 @@ scene_ends = scene_starts[1:] + [round(INFLATED_DUR, 2)]
 
 # ── Build clip list (4-7s sub-clips per scene) ────────────────────────────────
 CLIPS = []
-for i, (s_start, s_end, (desc, queries)) in enumerate(
+for i, (s_start, s_end, (desc, queries, scene_text)) in enumerate(
         zip(scene_starts, scene_ends, SCENE_META)):
     scene_dur = s_end - s_start
     n = max(1, round(scene_dur / 5.5))
@@ -1193,6 +1251,7 @@ for i, (s_start, s_end, (desc, queries)) in enumerate(
             "desc": desc,
             "clip_desc": f"Aviation travel video: {desc}" if _video_title else desc,
             "queries": queries,
+            "scene_text": scene_text,
             "scene": i,
             "scene_last": is_last,
             "broll": (clip_idx % 4 == 3),  # every 4th clip is b-roll
@@ -1337,6 +1396,18 @@ for i, clip in enumerate(CLIPS):
     # ── Step 2: best offset within clip ───────────────────────────────────
     best_t, best_s = best_offset(raw_p, clip_desc, dur, actual_dur)
 
+    # ── Step 2b: smarter clip rejection (vision verify on borderline scores) ─
+    # CLIP can be fooled by keyword/visual overlap. When its score is in the
+    # ambiguous band, ask the vision model whether the chosen frame truly fits
+    # the scene meaning. A rejected clip is penalized so the image-fallback path
+    # below prefers a better-matching still; if nothing better exists, the
+    # original clip is kept (fail-open — never produces a blank segment).
+    if CLIP_VERIFY_LOW <= best_s <= CLIP_VERIFY_HIGH:
+        frame_fp = f"{FRMDIR}/tmp_{abs(hash(raw_p+str(best_t)))}.jpg"
+        if not verify_clip_semantic(frame_fp, clip.get("scene_text",""), clip_desc):
+            print(f"  ⚠ vision rejected {vid} (CLIP={best_s:.3f}) — seeking better match")
+            best_s -= 0.10
+
     # ── Image fallback: no good video match → try a Ken Burns still ────────
     # Only when the video score is poor AND we haven't already placed
     # MAX_CONSECUTIVE_IMAGES stills in a row (continuity rule, avoids boredom).
@@ -1400,7 +1471,7 @@ for i, clip in enumerate(CLIPS):
 
         # ── B-roll cutaway every N clips ──────────────────────────────────
         if (i + 1) % BROLL_EVERY_N_CLIPS == 0:
-            broll_queries = get_broll_queries(clip["desc"])
+            broll_queries = get_broll_queries(clip["desc"], video_context=_video_context)
             if broll_queries:
                 br_candidates = []
                 br_candidates += search_pexels(broll_queries, BROLL_DURATION, top_n=6)
