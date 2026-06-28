@@ -11,3 +11,11 @@ build/
 venv/
 *.bak
 CLAUDE.md
+api_keys.env
+*.mp4
+!cta_preview_v2.mp4
+used_clip_ids.json
+.used_clips.json
+sample_*.mp4
+demo_effects.py
+demo_effects_video.mp4
